@@ -12,3 +12,4 @@ docs_private/
 runs/
 data/
 note.md
+*.pth
