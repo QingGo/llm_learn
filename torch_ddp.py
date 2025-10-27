@@ -363,6 +363,24 @@ Total training time: 526.98s
 Average time per epoch: 526.98s
 Overall throughput: 94.88 samples/sec
 CPU 服务器 uv run torchrun --nproc_per_node=4 torch_ddp.py，cpu 四进程训练
+Total training time: 66.00s                                                               │请执行以下命令开启系统代理: proxy_on
+Average time per epoch: 66.00s                                                            │
+Overall throughput: 757.52 samples/sec
+GPU 服务器 uv run torchrun --nproc_per_node=8 torch_ddp.py，8块3090训练
+Training completed!
+Total training time: 8.13s
+Average time per epoch: 8.13s
+Overall throughput: 6149.27 samples/sec
+GPU 服务器 uv run torchrun --nproc_per_node=4 torch_ddp.py，4块3090训练
+Training completed!
+Total training time: 13.18s
+Average time per epoch: 13.18s
+Overall throughput: 3792.22 samples/sec
+GPU 服务器 uv run torchrun --nproc_per_node=1 torch_ddp.py，1块3090训练
+Training completed!
+Total training time: 34.80s
+Average time per epoch: 34.80s
+Overall throughput: 1436.94 samples/sec
 '''
 
 if __name__ == "__main__":
