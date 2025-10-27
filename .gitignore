@@ -13,3 +13,4 @@ runs/
 data/
 note.md
 *.pth
+.DS_Store

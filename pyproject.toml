@@ -13,4 +13,5 @@ dependencies = [
     "torch>=2.9.0",
     "torchvision>=0.24.0",
     "torchviz>=0.0.3",
+    "transformers>=4.57.1",
 ]
