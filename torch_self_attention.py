@@ -43,6 +43,19 @@ class SingleHeadAttention(nn.Module):
         
         return output, attention_probs
 
+class FFN(nn.Module):
+    def __init__(self, d_model, d_hidden):
+        super().__init__()
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_hidden),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(d_hidden, d_model),
+        )
+
+    def forward(self, x):
+        return self.ffn(x)
+
 if __name__ == "__main__":
     # 1. 初始化单头注意力（d_model=768)
     attention = SingleHeadAttention(d_model=768)
@@ -59,6 +72,16 @@ if __name__ == "__main__":
     print("输出维度（应与输入一致：[2,5,768]）:", output.shape)
     print("注意力权重维度（应：[2,5,5]）:", attn_probs.shape)
 
+    # 5. 初始化FFN（d_model=768, d_hidden=3072）
+    ffn = FFN(d_model=768, d_hidden=2048)
+
+    # 6. 前向传播
+    ffn_output = ffn(output)
+
+    # 7. 验证维度
+    print("FFN输出维度（应与输入一致：[2,5,768]）:", ffn_output.shape)
+
     # 预期输出：
     # 输出维度（应与输入一致：[2,5,768]）: torch.Size([2, 5, 768])
     # 注意力权重维度（应：[2,5,5]）: torch.Size([2, 5, 5])
+    # FFN输出维度（应与输入一致：[2,5,768]）: torch.Size([2, 5, 768])
