@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 
-class SingleHeadAttention(nn.Module):
+class AttentionUnit(nn.Module):
     def __init__(self, d_model):
         super().__init__()
         # d_model：输入输出特征维度（单头中d_k=d_model）
@@ -51,6 +51,7 @@ class FFN(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.1),
             nn.Linear(d_hidden, d_model),
+            nn.Dropout(p=0.1),
         )
 
     def forward(self, x):
@@ -58,7 +59,7 @@ class FFN(nn.Module):
 
 if __name__ == "__main__":
     # 1. 初始化单头注意力（d_model=768)
-    attention = SingleHeadAttention(d_model=768)
+    attention = AttentionUnit(d_model=768)
 
     # 2. 构造输入（batch_size=2, seq_len=5）
     q_input = torch.randn(2, 5, 768)  # 查询输入
