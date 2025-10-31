@@ -238,3 +238,21 @@ if __name__ == "__main__":
     y = torch.randint(0, 10000, (2, 5))
     logits = transformer(x, y)
     print(logits.shape)  # torch.Size([2, 5, 10000])
+    # 统计参数量
+    total=sum(p.numel() for p in transformer.parameters())
+    trainable=sum(p.numel() for p in transformer.parameters() if p.requires_grad)
+    print('total=', total, 'trainable=', trainable) # total= 88031232 trainable= 88031232
+    '''
+    - Embedding : 10000 × 768 = 7,680,000
+    - 单个 Encoder 层:
+    - Self-Attn 4 线性层: 4 × (768×768 + 768) = 2,362,368
+    - FFN 两层: 768×2048 + 2048×768 + 2048 + 768 = 3,148,544
+    - 两个 LayerNorm: 2 × (γ+β) = 2 × 2×768 = 3,072
+    - 合计每层 5,513,984 ， ×6 = 33,083,904
+    - 单个 Decoder 层:
+    - 两个 Attn（含 masked + cross）: 2 × 2,362,368 = 4,724,736
+    - FFN: 3,148,544
+    - 三个 LayerNorm: 3 × 2×768 = 4,608
+    - 合计每层 7,877,888 ， ×6 = 47,267,328
+    - 总计: 7,680,000 + 33,083,904 + 47,267,328 = 88,031,232 （与已统计一致）
+    '''
