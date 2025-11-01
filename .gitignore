@@ -17,3 +17,4 @@ note.md
 temp_cleaned_data.csv
 temp_processed_data.csv
 training_losses.txt
+.pytest_cache

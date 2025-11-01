@@ -1,7 +1,12 @@
 import torch
 import pytest
+import sys
+import os
 
-from torch_attention import AttentionUnit, FFN, Transformer
+# 添加src目录到Python路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from transformer.model import AttentionUnit, FFN, Transformer
 
 
 def test_attention_output_shapes_and_sum_to_one_in_eval():

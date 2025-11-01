@@ -20,6 +20,10 @@ class DataConfig:
     dataset_config: str = "en-zh"
     split: str = "train"
     verbose: bool = True
+    # 数据集切分比例
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
 
 
 # 参考 openai_public.py 定义特殊标记
@@ -363,20 +367,69 @@ class TranslationDataProcessor:
         
         return df, stats
     
-    def create_dataloader(self) -> DataLoader:
-        """创建数据加载器（公共方法）"""
+    def _split_dataset(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """切分数据集为训练集、验证集和测试集"""
+        # 确保比例加起来为1
+        total_ratio = self.config.train_ratio + self.config.val_ratio + self.config.test_ratio
+        if abs(total_ratio - 1.0) > 1e-6:
+            raise ValueError(f"数据集切分比例之和必须为1.0，当前为{total_ratio}")
+        
+        # 随机打乱数据
+        df_shuffled = df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        total_samples = len(df_shuffled)
+        train_end = int(total_samples * self.config.train_ratio)
+        val_end = train_end + int(total_samples * self.config.val_ratio)
+        
+        train_df = df_shuffled[:train_end].copy()
+        val_df = df_shuffled[train_end:val_end].copy()
+        test_df = df_shuffled[val_end:].copy()
+        
+        if self.config.verbose:
+            print("\n数据集切分结果:")
+            print(f"  训练集: {len(train_df)}条 ({len(train_df)/total_samples*100:.1f}%)")
+            print(f"  验证集: {len(val_df)}条 ({len(val_df)/total_samples*100:.1f}%)")
+            print(f"  测试集: {len(test_df)}条 ({len(test_df)/total_samples*100:.1f}%)")
+        
+        return train_df, val_df, test_df
+    
+    def create_dataloaders(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
+        """创建训练、验证和测试数据加载器"""
         df, stats = self._process_data()
         
-        dataset = TranslationDataset(self._df)
-        dataloader = DataLoader(
-            dataset,
+        # 切分数据集
+        train_df, val_df, test_df = self._split_dataset(df)
+        
+        # 创建数据集
+        train_dataset = TranslationDataset(train_df)
+        val_dataset = TranslationDataset(val_df)
+        test_dataset = TranslationDataset(test_df)
+        
+        # 创建数据加载器
+        train_dataloader = DataLoader(
+            train_dataset,
             batch_size=self.config.batch_size,
             shuffle=True,
             drop_last=True
         )
+        
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            drop_last=False
+        )
+        
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            drop_last=False
+        )
+        
         if self.config.verbose:
             print(stats)
-            sample_data = self._get_sample_data()
+            sample_data = self._get_sample_data(train_df)
             print("\n数据示例：")
             print(f"英文原句：{sample_data['en_clean']}")
             print(f"英文ID序列：{sample_data['en_token_ids']}")
@@ -384,14 +437,14 @@ class TranslationDataProcessor:
             print(f"中文ID序列：{sample_data['zh_token_ids']}")
             print(f"处理后英文长度：{len(sample_data['en_processed'])}")
             print(f"处理后中文长度：{len(sample_data['zh_processed'])}")
-            df.head()
             
-        return dataloader
+        return train_dataloader, val_dataloader, test_dataloader
     
-    def _get_sample_data(self) -> Dict[str, Any]:
+    def _get_sample_data(self, df: pd.DataFrame = None) -> Dict[str, Any]:
         """获取样本数据用于展示"""
-
-        df = self._df
+        if df is None:
+            df = self._df
+        
         sample_data = {
             'en_original': df["en"].iloc[0],
             'zh_original': df["zh"].iloc[0],
@@ -406,6 +459,42 @@ class TranslationDataProcessor:
     
 
 # 便捷函数，用于快速创建数据处理器和数据加载器
+def create_translation_dataloaders(
+    max_samples: int = 1000,
+    batch_size: int = 16,
+    en_max_len: Optional[int] = None,
+    zh_max_len: Optional[int] = None,
+    length_percentile: float = 0.95,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    verbose=True
+) -> Tuple[DataLoader, DataLoader, DataLoader, TranslationDataProcessor]:
+    """
+    工厂方法：创建训练、验证、测试数据加载器
+    
+    Returns:
+        train_dataloader: 训练数据加载器
+        val_dataloader: 验证数据加载器
+        test_dataloader: 测试数据加载器
+        processor: 数据处理器实例
+    """
+    config = DataConfig(
+        max_samples=max_samples,
+        batch_size=batch_size,
+        en_max_len=en_max_len,
+        zh_max_len=zh_max_len,
+        length_percentile=length_percentile,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        verbose=verbose
+    )
+    processor = TranslationDataProcessor(config)
+    train_dataloader, val_dataloader, test_dataloader = processor.create_dataloaders()
+    return train_dataloader, val_dataloader, test_dataloader, processor
+
+
 def create_translation_dataloader(
     max_samples: int = 1000,
     batch_size: int = 16,
@@ -415,7 +504,7 @@ def create_translation_dataloader(
     verbose=True
 ) -> Tuple[DataLoader, TranslationDataProcessor]:
     """
-    工厂方法：创建翻译数据加载器
+    工厂方法：创建单个翻译数据加载器
     
     Returns:
         dataloader: 数据加载器
@@ -429,7 +518,6 @@ def create_translation_dataloader(
         length_percentile=length_percentile,
         verbose=verbose
     )
-    # 使用内部创建标志创建处理器实例
     processor = TranslationDataProcessor(config)
     return processor.create_dataloader(), processor
 

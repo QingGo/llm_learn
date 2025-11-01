@@ -1,4 +1,6 @@
-import random, numpy as np, torch
+import random
+import numpy as np
+import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
