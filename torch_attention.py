@@ -4,6 +4,7 @@ import math
 from typing import Optional
 
 
+
 class AttentionUnit(nn.Module):
     def __init__(self, d_model: int, seq_len: int, n_heads: int = 1, use_mask=False):
         super().__init__()
@@ -104,8 +105,7 @@ class FFN(nn.Module):
             nn.Linear(d_model, d_hidden),
             nn.ReLU(),
             nn.Dropout(p=0.1),
-            nn.Linear(d_hidden, d_model),
-            nn.Dropout(p=0.1),
+            nn.Linear(d_hidden, d_model)
         )
 
     def forward(self, x):
@@ -119,14 +119,17 @@ class Encoder(nn.Module):
         self.ffn = FFN(d_model, d_hidden)
         self.layer_norm1 = nn.LayerNorm(d_model)
         self.layer_norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x, key_padding_mask=None):
         res_1 = x
         x = self.self_attention(x, x, x, key_padding_mask)
+        x = self.dropout(x)
         x = x + res_1  # [bs, seq_len, d_model]
         x = self.layer_norm1(x)
         res_2 = x
         x = self.ffn(x)
+        x = self.dropout(x)
         x = x + res_2  # [bs, seq_len, d_model]
         x = self.layer_norm2(x)
         return x
@@ -141,18 +144,22 @@ class Decoder(nn.Module):
         self.layer_norm1 = nn.LayerNorm(d_model)
         self.layer_norm2 = nn.LayerNorm(d_model)
         self.layer_norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x, k, v, key_padding_mask=None):
         res_1 = x
         x = self.masked_attention(x, x, x, key_padding_mask)
+        x = self.dropout(x)
         x = x + res_1  # [bs, seq_len, d_model]
         x = self.layer_norm1(x)
         res_2 = x
         x = self.attention(x, k, v)
+        x = self.dropout(x)
         x = x + res_2
         x = self.layer_norm2(x)
         res_3 = x
         x = self.ffn(x)
+        x = self.dropout(x)
         x = x + res_3  # [bs, seq_len, d_model]
         x = self.layer_norm3(x)
         return x
@@ -187,6 +194,10 @@ class Transformer(nn.Module):
         self.register_buffer('pos_encoding_cache', None)
         self.cached_seq_len = 0
 
+        # embedding dropout
+        self.decoder_embed_dropout = nn.Dropout(p=0.1)
+        self.encoder_embed_dropout = nn.Dropout(p=0.1)
+
     def forward(self, x, y, x_padding_mask=None, y_padding_mask=None):
         x_seq_len = x.shape[1]
         y_seq_len = y.shape[1]
@@ -194,11 +205,13 @@ class Transformer(nn.Module):
         x = self.embedding(x)  # [bs, seq_len, d_model]
         x = x * self.embed_scale
         x = x + self._pos_encoding(x_seq_len, device=x.device)
+        x = self.encoder_embed_dropout(x)
         for encoder in self.encoder:
             x = encoder(x, x_padding_mask)
         y = self.embedding(y)  # [bs, seq_len, d_model]
         y = y * self.embed_scale
         y = y + self._pos_encoding(y_seq_len, device=y.device)  # 修复设备问题
+        y = self.decoder_embed_dropout(y)
         for decoder in self.decoder:
             y = decoder(y, x, x, y_padding_mask)  # [bs, seq_len, d_model]
         logits = self.output_linear(y)  # [bs, seq_len, vocab_size]
@@ -227,7 +240,6 @@ class Transformer(nn.Module):
             self.cached_seq_len = max_len
         
         return self.pos_encoding_cache[:seq_len]
-
 
 if __name__ == "__main__":
     transformer = Transformer(

@@ -14,3 +14,6 @@ data/
 note.md
 *.pth
 .DS_Store
+temp_cleaned_data.csv
+temp_processed_data.csv
+training_losses.txt
