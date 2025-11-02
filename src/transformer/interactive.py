@@ -4,7 +4,8 @@ from typing import Optional
 
 from .model import Transformer
 from .prepare_data import create_translation_dataloaders
-from .train import get_device, TranslationInference
+from .train import get_device
+from .inference import TranslationInference
 
 def interactive_evaluation(model_path: str, device: str = None):
     """交互式评估模式，实时翻译英文到中文"""

@@ -4,14 +4,14 @@ import torch.optim as optim
 import math
 import os
 import json
-import time
 import typer
-from typing import List, Tuple, Optional
+from typing import Tuple, Optional
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from .model import Transformer
 from .prepare_data import create_translation_dataloaders
+from .inference import TranslationInference
 
 def get_device() -> str:
     """智能选择设备：优先级 mps > cuda > cpu"""
@@ -111,7 +111,7 @@ class TranslationTrainer:
             self.step_count += 1
             if self.verbose:
                 # 将每步的loss写入文件
-                with open('srcs/training_losses.txt', 'a', encoding='utf-8') as f:
+                with open('logs/training_losses.txt', 'a', encoding='utf-8') as f:
                     f.write(f'{self.step_count},{loss.item():.6f}\n')
             
             # 记录到 TensorBoard
@@ -245,15 +245,24 @@ class TranslationTrainer:
         
         return avg_loss, perplexity
     
-    def train(self, train_dataloader, val_dataloader, test_dataloader, num_epochs: int, save_dir: str = './checkpoints'):
+    def train(self, train_dataloader, val_dataloader, test_dataloader, num_epochs: int, 
+              save_dir: str = './checkpoints', resume_from_checkpoint: str = None):
         """完整训练流程"""
         os.makedirs(save_dir, exist_ok=True)
         
+        # 确定起始epoch
+        start_epoch = 0
+        if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
+            print(f"从检查点恢复训练: {resume_from_checkpoint}")
+            start_epoch = self.load_model(resume_from_checkpoint, load_optimizer=True)
+        
         print(f"开始训练，共 {num_epochs} 个epoch")
+        if start_epoch > 0:
+            print(f"从第 {start_epoch + 1} 个epoch继续训练")
         print(f"设备: {self.device}")
         print(f"模型参数量: {sum(p.numel() for p in self.model.parameters()):,}")
         
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
             
             # 训练
@@ -271,7 +280,7 @@ class TranslationTrainer:
             # 保存最佳模型
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                self.save_model(os.path.join(save_dir, 'best_model.pt'))
+                self.save_model(os.path.join(save_dir, 'best_model.pt'), epoch)
                 print(f"保存最佳模型，验证损失: {val_loss:.4f}")
                 
                 # 记录最佳验证损失到 TensorBoard
@@ -281,7 +290,7 @@ class TranslationTrainer:
             # 每5个epoch保存一次检查点
             if (epoch + 1) % 5 == 0:
                 checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pt')
-                self.save_model(checkpoint_path)
+                self.save_model(checkpoint_path, epoch)
                 print(f"保存检查点: {checkpoint_path}")
         
         # 训练结束后评估测试集
@@ -307,36 +316,57 @@ class TranslationTrainer:
         
         print("\n训练完成！")
     
-    def save_model(self, filepath: str):
-        """保存模型"""
-        torch.save({
+    def save_model(self, filepath: str, epoch: int = None):
+        """保存模型和训练状态"""
+        save_dict = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
+            'train_perplexities': self.train_perplexities,
+            'val_perplexities': self.val_perplexities,
             'best_val_loss': self.best_val_loss,
+            'step_count': self.step_count,
             'model_config': {
                 'vocab_size': self.model.embedding.num_embeddings,
                 'd_model': self.model.d_model,
                 'seq_len': self.model.seq_len,
-                'n_heads': self.model.n_heads,  # 这里需要根据实际情况调整
+                'n_heads': self.model.n_heads,
+                'd_hidden': self.model.d_hidden,
                 'stack': len(self.model.encoder)
             }
-        }, filepath)
+        }
+        
+        # 如果提供了epoch信息，也保存
+        if epoch is not None:
+            save_dict['epoch'] = epoch
+            
+        torch.save(save_dict, filepath)
     
-    def load_model(self, filepath: str):
-        """加载模型"""
+    def load_model(self, filepath: str, load_optimizer: bool = True):
+        """加载模型和训练状态"""
         checkpoint = torch.load(filepath, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         
-        if self.optimizer and checkpoint['optimizer_state_dict']:
+        if load_optimizer and self.optimizer and checkpoint.get('optimizer_state_dict'):
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
+        # 恢复训练历史
         self.train_losses = checkpoint.get('train_losses', [])
         self.val_losses = checkpoint.get('val_losses', [])
+        self.train_perplexities = checkpoint.get('train_perplexities', [])
+        self.val_perplexities = checkpoint.get('val_perplexities', [])
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.step_count = checkpoint.get('step_count', 0)
+        
+        # 返回epoch信息（如果有的话）
+        start_epoch = checkpoint.get('epoch', 0)
         
         print(f"模型加载成功: {filepath}")
+        if start_epoch > 0:
+            print(f"将从第 {start_epoch + 1} 个epoch开始继续训练")
+        
+        return start_epoch
     
     def save_training_history(self, save_dir: str):
         """保存训练历史"""
@@ -382,157 +412,6 @@ class TranslationTrainer:
         plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-
-class TranslationInference:
-    """翻译推理器"""
-    
-    def __init__(self, model: Transformer, processor, device: str = 'cpu'):
-        self.model = model.to(device)
-        self.device = device
-        self.processor = processor
-        self.model.eval()
-    
-    def translate(self, english_text: str, max_length: int = 50, beam_size: int = 1) -> Tuple[str, float]:
-        """将英文翻译成中文，返回翻译结果和推理时间"""
-        start_time = time.time()
-        
-        # 预处理输入文本
-        cleaned_text = self.processor._clean_text(english_text, is_english=True)
-        
-        # 分词
-        token_ids = self.processor._tokenizer.encode(cleaned_text)
-        
-        # 处理序列（添加padding等）
-        src_tokens = self.processor._process_sequence_tokens(token_ids, is_target=False, max_len=self.model.seq_len)
-        
-        # 转换为tensor
-        src_tensor = torch.tensor([src_tokens], dtype=torch.long, device=self.device)  # [1, seq_len]
-        
-        # 创建padding mask
-        src_padding_mask = src_tensor == 100257  # pad token
-        
-        if beam_size == 1:
-            translation = self._greedy_decode(src_tensor, src_padding_mask, max_length)
-        else:
-            translation = self._beam_search_decode(src_tensor, src_padding_mask, max_length, beam_size)
-        
-        end_time = time.time()
-        inference_time = end_time - start_time
-        
-        return translation, inference_time
-    
-    def _greedy_decode(self, src_tensor: torch.Tensor, src_padding_mask: torch.Tensor, max_length: int) -> str:
-        """贪心解码"""
-        batch_size = src_tensor.size(0)
-        
-        # 初始化decoder输入，从<bos> token开始
-        decoder_input = torch.tensor([[100258]], dtype=torch.long, device=self.device)  # <bos> token
-        
-        with torch.no_grad():
-            for _ in range(max_length):
-                # 创建decoder padding mask
-                tgt_padding_mask = decoder_input == 100257
-                
-                # 前向传播
-                logits = self.model(src_tensor, decoder_input, src_padding_mask, tgt_padding_mask)
-                
-                # 获取最后一个位置的预测
-                next_token_logits = logits[:, -1, :]  # [batch_size, vocab_size]
-                
-                # 贪心选择概率最大的token
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # [batch_size, 1]
-                
-                # 如果生成了<eos> token，停止生成
-                if next_token.item() == 100259:  # <eos> token
-                    break
-                
-                # 将新token添加到decoder输入
-                decoder_input = torch.cat([decoder_input, next_token], dim=1)
-        
-        # 解码生成的token序列
-        generated_tokens = decoder_input[0].tolist()
-        
-        # 移除<bos>和<eos> token
-        if generated_tokens[0] == 100258:  # <bos>
-            generated_tokens = generated_tokens[1:]
-        if generated_tokens and generated_tokens[-1] == 100259:  # <eos>
-            generated_tokens = generated_tokens[:-1]
-        
-        # 转换为文本
-        translated_text = self.processor.decode_tokens(generated_tokens, remove_special_tokens=True)
-        return translated_text
-    
-    def _beam_search_decode(self, src_tensor: torch.Tensor, src_padding_mask: torch.Tensor, 
-                           max_length: int, beam_size: int) -> str:
-        """束搜索解码"""
-        # 简化版束搜索实现
-        batch_size = src_tensor.size(0)
-        
-        # 初始化beam
-        beams = [{'tokens': [100258], 'score': 0.0}]  # 从<bos>开始
-        
-        with torch.no_grad():
-            for step in range(max_length):
-                candidates = []
-                
-                for beam in beams:
-                    if beam['tokens'][-1] == 100259:  # 如果已经结束，直接添加到候选
-                        candidates.append(beam)
-                        continue
-                    
-                    # 准备decoder输入
-                    decoder_input = torch.tensor([beam['tokens']], dtype=torch.long, device=self.device)
-                    tgt_padding_mask = decoder_input == 100257
-                    
-                    # 前向传播
-                    logits = self.model(src_tensor, decoder_input, src_padding_mask, tgt_padding_mask)
-                    next_token_logits = logits[:, -1, :]  # [1, vocab_size]
-                    
-                    # 获取top-k候选
-                    log_probs = torch.log_softmax(next_token_logits, dim=-1)
-                    top_k_probs, top_k_indices = torch.topk(log_probs, beam_size, dim=-1)
-                    
-                    # 为每个候选创建新的beam
-                    for i in range(beam_size):
-                        new_token = top_k_indices[0, i].item()
-                        new_score = beam['score'] + top_k_probs[0, i].item()
-                        
-                        candidates.append({
-                            'tokens': beam['tokens'] + [new_token],
-                            'score': new_score
-                        })
-                
-                # 选择最佳的beam_size个候选
-                candidates.sort(key=lambda x: x['score'], reverse=True)
-                beams = candidates[:beam_size]
-                
-                # 如果所有beam都结束了，提前停止
-                if all(beam['tokens'][-1] == 100259 for beam in beams):
-                    break
-        
-        # 选择得分最高的beam
-        best_beam = max(beams, key=lambda x: x['score'])
-        generated_tokens = best_beam['tokens']
-        
-        # 移除特殊token
-        if generated_tokens[0] == 100258:  # <bos>
-            generated_tokens = generated_tokens[1:]
-        if generated_tokens and generated_tokens[-1] == 100259:  # <eos>
-            generated_tokens = generated_tokens[:-1]
-        
-        # 转换为文本
-        translated_text = self.processor.decode_tokens(generated_tokens, remove_special_tokens=True)
-        return translated_text
-    
-    def translate_batch(self, english_texts: List[str], max_length: int = 50) -> List[Tuple[str, float]]:
-        """批量翻译，返回翻译结果和推理时间的列表"""
-        results = []
-        for text in english_texts:
-            translation, inference_time = self.translate(text, max_length)
-            results.append((translation, inference_time))
-        return results
-
-
 def create_model_and_trainer(vocab_size: int = 100260, d_model: int = 512, seq_len: int = 128, 
                            n_heads: int = 8, d_hidden: int = 2048, stack: int = 6, 
                            device: str = None, log_dir: str = 'runs/transformer', 
@@ -566,7 +445,8 @@ def main(
     length_percentile: float = typer.Option(0.9, help="长度百分位数"),
     num_epochs: int = typer.Option(10, help="训练轮数"),
     log_dir: Optional[str] = typer.Option('./runs/translation_training', help="TensorBoard 日志目录"),
-    disable_tensorboard: bool = typer.Option(False, help="禁用 TensorBoard 记录")
+    disable_tensorboard: bool = typer.Option(False, help="禁用 TensorBoard 记录"),
+    resume_checkpoint: Optional[str] = typer.Option(None, help="从指定检查点继续训练")
 ):
     """演示训练流程"""
     print("=== 翻译模型训练演示 ===")
@@ -582,16 +462,35 @@ def main(
     
     # 2. 创建模型和训练器
     print("2. 创建模型...")
-    model, trainer = create_model_and_trainer(
-        vocab_size=100260,  # tiktoken词汇表大小 + 特殊token
-        d_model=512,
-        seq_len=64,  # 根据数据统计调整
-        n_heads=8,
-        d_hidden=2048,
-        stack=6,
-        log_dir=log_dir,
-        enable_tensorboard=not disable_tensorboard
-    )
+    
+    # 如果有检查点，从检查点加载模型配置
+    if resume_checkpoint and os.path.exists(resume_checkpoint):
+        print(f"从检查点加载模型配置: {resume_checkpoint}")
+        checkpoint = torch.load(resume_checkpoint, map_location='cpu')
+        model_config = checkpoint.get('model_config', {})
+        
+        model, trainer = create_model_and_trainer(
+            vocab_size=model_config.get('vocab_size', 100260),
+            d_model=model_config.get('d_model', 512),
+            seq_len=model_config.get('seq_len', 64),
+            n_heads=model_config.get('n_heads', 8),
+            d_hidden=model_config.get('d_hidden', 2048),
+            stack=model_config.get('stack', 6),
+            log_dir=log_dir,
+            enable_tensorboard=not disable_tensorboard
+        )
+    else:
+        # 使用默认配置创建新模型
+        model, trainer = create_model_and_trainer(
+            vocab_size=100260,  # tiktoken词汇表大小 + 特殊token
+            d_model=512,
+            seq_len=64,  # 根据数据统计调整
+            n_heads=8,
+            d_hidden=2048,
+            stack=6,
+            log_dir=log_dir,
+            enable_tensorboard=not disable_tensorboard
+        )
     
     # 3. 设置训练参数
     trainer.setup_training(learning_rate=1e-4, weight_decay=1e-5)
@@ -603,7 +502,8 @@ def main(
         val_dataloader=val_dataloader,
         test_dataloader=test_dataloader,
         num_epochs=num_epochs,
-        save_dir='./translation_checkpoints'
+        save_dir='./translation_checkpoints',
+        resume_from_checkpoint=resume_checkpoint
     )
     
     # 5. 测试推理
