@@ -4,11 +4,12 @@ import torch.optim as optim
 import math
 import os
 import json
+import typer
 from typing import List, Tuple
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from model import Transformer
-from prepare_data import create_translation_dataloaders
+from .model import Transformer
+from .prepare_data import create_translation_dataloaders
 
 def get_device() -> str:
     """智能选择设备：优先级 mps > cuda > cpu"""
@@ -38,7 +39,7 @@ class TranslationTrainer:
         
     def setup_training(self, learning_rate: float = 1e-4, weight_decay: float = 1e-5):
         """设置训练参数"""
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         # 使用标签平滑的交叉熵损失，忽略padding token
         self.criterion = nn.CrossEntropyLoss(ignore_index=100257, label_smoothing=0.1)  # 100257是pad token
         
@@ -465,19 +466,24 @@ def create_model_and_trainer(vocab_size: int = 100260, d_model: int = 512, seq_l
     return model, trainer
 
 
-def demo_training():
+app = typer.Typer(help="训练翻译模型")
+
+@app.command()
+def main(
+    max_samples: int = typer.Option(1000, help="最大样本数量"),
+    batch_size: int = typer.Option(16, help="批次大小"),
+    length_percentile: float = typer.Option(0.9, help="长度百分位数"),
+    num_epochs: int = typer.Option(10, help="训练轮数")
+):
     """演示训练流程"""
     print("=== 翻译模型训练演示 ===")
     
     # 1. 准备数据
     print("1. 加载数据...")
     train_dataloader, val_dataloader, test_dataloader, processor = create_translation_dataloaders(
-        max_samples=1000,
-        batch_size=16,
-        length_percentile=0.9,
-        train_ratio=0.8,
-        val_ratio=0.1,
-        test_ratio=0.1,
+        max_samples=max_samples,
+        batch_size=batch_size,
+        length_percentile=length_percentile,
         verbose=True
     )
     
@@ -501,7 +507,7 @@ def demo_training():
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         test_dataloader=test_dataloader,
-        num_epochs=10,
+        num_epochs=num_epochs,
         save_dir='./translation_checkpoints'
     )
     
@@ -524,4 +530,4 @@ def demo_training():
 
 
 if __name__ == "__main__":
-    demo_training()
+    app()

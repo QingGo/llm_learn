@@ -18,12 +18,7 @@ class DataConfig:
     length_percentile: float = 0.95  # 用于自动确定最大长度的百分位数
     dataset_name: str = "Helsinki-NLP/opus-100"
     dataset_config: str = "en-zh"
-    split: str = "train"
     verbose: bool = True
-    # 数据集切分比例
-    train_ratio: float = 0.8
-    val_ratio: float = 0.1
-    test_ratio: float = 0.1
 
 
 # 参考 openai_public.py 定义特殊标记
@@ -217,14 +212,14 @@ class TranslationDataProcessor:
             print(f"解码失败: {e}")
             return ""
     
-    def _load_dataset(self) -> pd.DataFrame:
+    def _load_dataset(self, split: str = "train") -> pd.DataFrame:
         """加载数据集"""
-        print("正在加载数据集...")
+        print(f"正在加载数据集 ({split})...")
         dataset = load_dataset(self.config.dataset_name, self.config.dataset_config)
         
         # 提取英文和中文句子
-        en_sentences = [item["translation"]["en"] for item in dataset[self.config.split]]
-        zh_sentences = [item["translation"]["zh"] for item in dataset[self.config.split]]
+        en_sentences = [item["translation"]["en"] for item in dataset[split]]
+        zh_sentences = [item["translation"]["zh"] for item in dataset[split]]
         
         # 构建DataFrame
         df = pd.DataFrame({
@@ -232,7 +227,7 @@ class TranslationDataProcessor:
             "zh": zh_sentences[:self.config.max_samples]
         })
         
-        print(f"原始数据量：{len(df)}条")
+        print(f"原始数据量 ({split})：{len(df)}条")
         return df
     
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -300,7 +295,7 @@ class TranslationDataProcessor:
         zh_stats = df["zh_token_length"].agg(agg_funcs)
         
         # 创建索引名称
-        index_names = [f'p{int(p*100)}' for p in percentiles] + ['max']
+        index_names = [f'p{int(p*100) if p < 0.99 else int(p*1000)}' for p in percentiles] + ['max']
         en_stats.index = index_names
         zh_stats.index = index_names
         
@@ -327,10 +322,10 @@ class TranslationDataProcessor:
         )
         return df
     
-    def _process_data(self) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    def _process_data(self, split: str = "train") -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """完整的数据处理流程"""
         # 1. 加载数据集
-        df = self._load_dataset()
+        df = self._load_dataset(split)
         
         # 2. 清洗数据
         df = self._clean_data(df)
@@ -354,7 +349,7 @@ class TranslationDataProcessor:
             df["en_decoded"] = df["en_processed"].apply(lambda x: self.decode_tokens(x))
             df["zh_decoded"] = df["zh_processed"].apply(lambda x: self.decode_tokens(x))
             # 把最多 1000 对处理序列进行还原，写入临时文件，确认处理逻辑正确
-            df[["en_decoded", "zh_decoded"]].head(1000).to_csv("temp_processed_data.csv", index=False, encoding="utf-8", sep="\t")
+            df[["en_decoded", "zh_decoded", "en_processed", "zh_processed"]].head(1000).to_csv(f"temp_processed_data_{split}.csv", index=False, encoding="utf-8", sep="\t")
         
         # 更新统计信息
         stats.update({
@@ -367,38 +362,12 @@ class TranslationDataProcessor:
         
         return df, stats
     
-    def _split_dataset(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """切分数据集为训练集、验证集和测试集"""
-        # 确保比例加起来为1
-        total_ratio = self.config.train_ratio + self.config.val_ratio + self.config.test_ratio
-        if abs(total_ratio - 1.0) > 1e-6:
-            raise ValueError(f"数据集切分比例之和必须为1.0，当前为{total_ratio}")
-        
-        # 随机打乱数据
-        df_shuffled = df.sample(frac=1, random_state=42).reset_index(drop=True)
-        
-        total_samples = len(df_shuffled)
-        train_end = int(total_samples * self.config.train_ratio)
-        val_end = train_end + int(total_samples * self.config.val_ratio)
-        
-        train_df = df_shuffled[:train_end].copy()
-        val_df = df_shuffled[train_end:val_end].copy()
-        test_df = df_shuffled[val_end:].copy()
-        
-        if self.config.verbose:
-            print("\n数据集切分结果:")
-            print(f"  训练集: {len(train_df)}条 ({len(train_df)/total_samples*100:.1f}%)")
-            print(f"  验证集: {len(val_df)}条 ({len(val_df)/total_samples*100:.1f}%)")
-            print(f"  测试集: {len(test_df)}条 ({len(test_df)/total_samples*100:.1f}%)")
-        
-        return train_df, val_df, test_df
-    
     def create_dataloaders(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
         """创建训练、验证和测试数据加载器"""
-        df, stats = self._process_data()
-        
-        # 切分数据集
-        train_df, val_df, test_df = self._split_dataset(df)
+        # 分别处理三个数据集
+        train_df, train_stats = self._process_data("train")
+        val_df, val_stats = self._process_data("validation")
+        test_df, test_stats = self._process_data("test")
         
         # 创建数据集
         train_dataset = TranslationDataset(train_df)
@@ -428,9 +397,13 @@ class TranslationDataProcessor:
         )
         
         if self.config.verbose:
-            print(stats)
+            print("\n=== 数据集统计信息 ===")
+            print(f"训练集统计: {train_stats}")
+            print(f"验证集统计: {val_stats}")
+            print(f"测试集统计: {test_stats}")
+            
             sample_data = self._get_sample_data(train_df)
-            print("\n数据示例：")
+            print("\n数据示例（来自训练集）：")
             print(f"英文原句：{sample_data['en_clean']}")
             print(f"英文ID序列：{sample_data['en_token_ids']}")
             print(f"中文原句：{sample_data['zh_clean']}")
@@ -439,6 +412,36 @@ class TranslationDataProcessor:
             print(f"处理后中文长度：{len(sample_data['zh_processed'])}")
             
         return train_dataloader, val_dataloader, test_dataloader
+    
+    def create_dataloader(self, split: str = "train") -> DataLoader:
+        """创建单个数据加载器"""
+        df, stats = self._process_data(split)
+        
+        # 创建数据集
+        dataset = TranslationDataset(df)
+        
+        # 创建数据加载器
+        dataloader = DataLoader(
+            dataset,
+            batch_size=self.config.batch_size,
+            shuffle=(split == "train"),  # 只有训练集需要shuffle
+            drop_last=(split == "train")  # 只有训练集需要drop_last
+        )
+        
+        if self.config.verbose:
+            print(f"\n=== {split} 数据集统计信息 ===")
+            print(f"统计: {stats}")
+            
+            sample_data = self._get_sample_data(df)
+            print(f"\n数据示例（来自{split}集）：")
+            print(f"英文原句：{sample_data['en_clean']}")
+            print(f"英文ID序列：{sample_data['en_token_ids']}")
+            print(f"中文原句：{sample_data['zh_clean']}")
+            print(f"中文ID序列：{sample_data['zh_token_ids']}")
+            print(f"处理后英文长度：{len(sample_data['en_processed'])}")
+            print(f"处理后中文长度：{len(sample_data['zh_processed'])}")
+            
+        return dataloader
     
     def _get_sample_data(self, df: pd.DataFrame = None) -> Dict[str, Any]:
         """获取样本数据用于展示"""
@@ -465,9 +468,6 @@ def create_translation_dataloaders(
     en_max_len: Optional[int] = None,
     zh_max_len: Optional[int] = None,
     length_percentile: float = 0.95,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
-    test_ratio: float = 0.1,
     verbose=True
 ) -> Tuple[DataLoader, DataLoader, DataLoader, TranslationDataProcessor]:
     """
@@ -485,9 +485,6 @@ def create_translation_dataloaders(
         en_max_len=en_max_len,
         zh_max_len=zh_max_len,
         length_percentile=length_percentile,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
         verbose=verbose
     )
     processor = TranslationDataProcessor(config)
@@ -501,10 +498,14 @@ def create_translation_dataloader(
     en_max_len: Optional[int] = None,
     zh_max_len: Optional[int] = None,
     length_percentile: float = 0.95,
+    split: str = "train",
     verbose=True
 ) -> Tuple[DataLoader, TranslationDataProcessor]:
     """
     工厂方法：创建单个翻译数据加载器
+    
+    Args:
+        split: 数据集切分，可选 "train", "validation", "test"
     
     Returns:
         dataloader: 数据加载器
@@ -519,7 +520,7 @@ def create_translation_dataloader(
         verbose=verbose
     )
     processor = TranslationDataProcessor(config)
-    return processor.create_dataloader(), processor
+    return processor.create_dataloader(split), processor
 
 
 def main():
