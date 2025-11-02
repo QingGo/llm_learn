@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 transformer-train = "src.transformer.train:app"
+transformer-interactive = "src.transformer.interactive:app"
 
 [build-system]
 requires = ["hatchling"]

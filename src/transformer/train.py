@@ -4,10 +4,12 @@ import torch.optim as optim
 import math
 import os
 import json
+import time
 import typer
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 from .model import Transformer
 from .prepare_data import create_translation_dataloaders
 
@@ -24,7 +26,7 @@ def get_device() -> str:
 class TranslationTrainer:
     """翻译模型训练器"""
     
-    def __init__(self, model: Transformer, device: str = None):
+    def __init__(self, model: Transformer, device: str = None, log_dir: str = None, enable_tensorboard: bool = True, verbose: bool = True):
         if device is None:
             device = get_device()
         self.model = model.to(device)
@@ -36,7 +38,27 @@ class TranslationTrainer:
         self.train_perplexities = []
         self.val_perplexities = []
         self.best_val_loss = float('inf')
+        self.step_count = 0  # 添加步数计数器
+        self.verbose = verbose
         
+        # TensorBoard 设置
+        self.enable_tensorboard = enable_tensorboard
+        self.writer = None
+        if self.enable_tensorboard:
+            self.writer = SummaryWriter(log_dir=log_dir)
+            print(f"TensorBoard 日志将保存到: {log_dir}")
+        
+        if verbose:
+            # 初始化training_losses.txt文件
+            self._init_loss_file()
+    
+    def _init_loss_file(self):
+        """初始化logs/training_losses.txt文件并写入表头"""
+        if not os.path.exists("logs"):
+            os.mkdir("logs")
+        with open('logs/training_losses.txt', 'w', encoding='utf-8') as f:
+            f.write('Step,Loss\n')
+    
     def setup_training(self, learning_rate: float = 1e-4, weight_decay: float = 1e-5):
         """设置训练参数"""
         self.optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -85,7 +107,20 @@ class TranslationTrainer:
             
             total_loss += loss.item()
             num_batches += 1
+
+            self.step_count += 1
+            if self.verbose:
+                # 将每步的loss写入文件
+                with open('srcs/training_losses.txt', 'a', encoding='utf-8') as f:
+                    f.write(f'{self.step_count},{loss.item():.6f}\n')
             
+            # 记录到 TensorBoard
+            if self.writer is not None:
+                self.writer.add_scalar('Loss/Train_Step', loss.item(), self.step_count)
+                if batch_idx % 10 == 0:  # 每10个batch记录一次学习率
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    self.writer.add_scalar('Learning_Rate', current_lr, self.step_count)
+
             # 更新进度条
             progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
             
@@ -94,6 +129,11 @@ class TranslationTrainer:
         
         self.train_losses.append(avg_loss)
         self.train_perplexities.append(perplexity)
+        
+        # 记录到 TensorBoard
+        if self.writer is not None:
+            self.writer.add_scalar('Loss/Train_Epoch', avg_loss, epoch)
+            self.writer.add_scalar('Perplexity/Train_Epoch', perplexity, epoch)
         
         return avg_loss, perplexity
     
@@ -136,11 +176,36 @@ class TranslationTrainer:
         self.val_losses.append(avg_loss)
         self.val_perplexities.append(perplexity)
         
+        # 记录到 TensorBoard
+        if self.writer is not None:
+            self.writer.add_scalar('Loss/Val_Epoch', avg_loss, epoch)
+            self.writer.add_scalar('Perplexity/Val_Epoch', perplexity, epoch)
+        
         return avg_loss, perplexity
     
     def _create_padding_mask(self, sequences: torch.Tensor, pad_token_id: int) -> torch.Tensor:
         """创建padding掩码"""
         return sequences == pad_token_id
+    
+    def _log_model_stats(self, epoch: int):
+        """记录模型参数和梯度统计信息到 TensorBoard"""
+        if self.writer is None:
+            return
+        
+        # 记录模型参数的统计信息
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                # 参数值的统计
+                self.writer.add_histogram(f'Parameters/{name}', param.data, epoch)
+                self.writer.add_scalar(f'Parameters/{name}_mean', param.data.mean().item(), epoch)
+                self.writer.add_scalar(f'Parameters/{name}_std', param.data.std().item(), epoch)
+                
+                # 梯度的统计（如果存在）
+                if param.grad is not None:
+                    self.writer.add_histogram(f'Gradients/{name}', param.grad.data, epoch)
+                    self.writer.add_scalar(f'Gradients/{name}_mean', param.grad.data.mean().item(), epoch)
+                    self.writer.add_scalar(f'Gradients/{name}_std', param.grad.data.std().item(), epoch)
+                    self.writer.add_scalar(f'Gradients/{name}_norm', param.grad.data.norm().item(), epoch)
     
     def evaluate_test_set(self, test_dataloader) -> Tuple[float, float]:
         """评估测试集，返回损失和perplexity"""
@@ -199,11 +264,19 @@ class TranslationTrainer:
             val_loss, val_ppl = self.validate_epoch(val_dataloader, epoch)
             print(f"验证损失: {val_loss:.4f}, 验证困惑度: {val_ppl:.2f}")
             
+            # 记录模型参数和梯度统计信息（每5个epoch记录一次以节省空间）
+            if (epoch + 1) % 5 == 0:
+                self._log_model_stats(epoch)
+            
             # 保存最佳模型
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 self.save_model(os.path.join(save_dir, 'best_model.pt'))
                 print(f"保存最佳模型，验证损失: {val_loss:.4f}")
+                
+                # 记录最佳验证损失到 TensorBoard
+                if self.writer is not None:
+                    self.writer.add_scalar('Loss/Best_Val', val_loss, epoch)
             
             # 每5个epoch保存一次检查点
             if (epoch + 1) % 5 == 0:
@@ -216,11 +289,21 @@ class TranslationTrainer:
         test_loss, test_ppl = self.evaluate_test_set(test_dataloader)
         print(f"测试损失: {test_loss:.4f}, 测试困惑度: {test_ppl:.2f}")
         
+        # 记录测试集结果到 TensorBoard
+        if self.writer is not None:
+            self.writer.add_scalar('Loss/Test', test_loss, num_epochs - 1)
+            self.writer.add_scalar('Perplexity/Test', test_ppl, num_epochs - 1)
+        
         # 保存训练历史
         self.save_training_history(save_dir)
         
         # 绘制损失曲线
         self.plot_training_history(save_dir)
+        
+        # 关闭 TensorBoard writer
+        if self.writer is not None:
+            self.writer.close()
+            print(f"TensorBoard 日志已保存，可以运行 'tensorboard --logdir={self.writer.log_dir}' 查看")
         
         print("\n训练完成！")
     
@@ -236,7 +319,7 @@ class TranslationTrainer:
                 'vocab_size': self.model.embedding.num_embeddings,
                 'd_model': self.model.d_model,
                 'seq_len': self.model.seq_len,
-                'n_heads': len(self.model.encoder),  # 这里需要根据实际情况调整
+                'n_heads': self.model.n_heads,  # 这里需要根据实际情况调整
                 'stack': len(self.model.encoder)
             }
         }, filepath)
@@ -309,8 +392,10 @@ class TranslationInference:
         self.processor = processor
         self.model.eval()
     
-    def translate(self, english_text: str, max_length: int = 50, beam_size: int = 1) -> str:
-        """将英文翻译成中文"""
+    def translate(self, english_text: str, max_length: int = 50, beam_size: int = 1) -> Tuple[str, float]:
+        """将英文翻译成中文，返回翻译结果和推理时间"""
+        start_time = time.time()
+        
         # 预处理输入文本
         cleaned_text = self.processor._clean_text(english_text, is_english=True)
         
@@ -327,9 +412,14 @@ class TranslationInference:
         src_padding_mask = src_tensor == 100257  # pad token
         
         if beam_size == 1:
-            return self._greedy_decode(src_tensor, src_padding_mask, max_length)
+            translation = self._greedy_decode(src_tensor, src_padding_mask, max_length)
         else:
-            return self._beam_search_decode(src_tensor, src_padding_mask, max_length, beam_size)
+            translation = self._beam_search_decode(src_tensor, src_padding_mask, max_length, beam_size)
+        
+        end_time = time.time()
+        inference_time = end_time - start_time
+        
+        return translation, inference_time
     
     def _greedy_decode(self, src_tensor: torch.Tensor, src_padding_mask: torch.Tensor, max_length: int) -> str:
         """贪心解码"""
@@ -434,18 +524,19 @@ class TranslationInference:
         translated_text = self.processor.decode_tokens(generated_tokens, remove_special_tokens=True)
         return translated_text
     
-    def translate_batch(self, english_texts: List[str], max_length: int = 50) -> List[str]:
-        """批量翻译"""
-        translations = []
+    def translate_batch(self, english_texts: List[str], max_length: int = 50) -> List[Tuple[str, float]]:
+        """批量翻译，返回翻译结果和推理时间的列表"""
+        results = []
         for text in english_texts:
-            translation = self.translate(text, max_length)
-            translations.append(translation)
-        return translations
+            translation, inference_time = self.translate(text, max_length)
+            results.append((translation, inference_time))
+        return results
 
 
 def create_model_and_trainer(vocab_size: int = 100260, d_model: int = 512, seq_len: int = 128, 
                            n_heads: int = 8, d_hidden: int = 2048, stack: int = 6, 
-                           device: str = None) -> Tuple[Transformer, TranslationTrainer]:
+                           device: str = None, log_dir: str = 'runs/transformer', 
+                           enable_tensorboard: bool = True) -> Tuple[Transformer, TranslationTrainer]:
     """创建模型和训练器的工厂函数"""
     if device is None:
         device = get_device()
@@ -461,7 +552,7 @@ def create_model_and_trainer(vocab_size: int = 100260, d_model: int = 512, seq_l
     )
     
     # 创建训练器
-    trainer = TranslationTrainer(model, device)
+    trainer = TranslationTrainer(model, device, log_dir, enable_tensorboard)
     
     return model, trainer
 
@@ -473,7 +564,9 @@ def main(
     max_samples: int = typer.Option(1000, help="最大样本数量"),
     batch_size: int = typer.Option(16, help="批次大小"),
     length_percentile: float = typer.Option(0.9, help="长度百分位数"),
-    num_epochs: int = typer.Option(10, help="训练轮数")
+    num_epochs: int = typer.Option(10, help="训练轮数"),
+    log_dir: Optional[str] = typer.Option('./runs/translation_training', help="TensorBoard 日志目录"),
+    disable_tensorboard: bool = typer.Option(False, help="禁用 TensorBoard 记录")
 ):
     """演示训练流程"""
     print("=== 翻译模型训练演示 ===")
@@ -495,7 +588,9 @@ def main(
         seq_len=64,  # 根据数据统计调整
         n_heads=8,
         d_hidden=2048,
-        stack=6
+        stack=6,
+        log_dir=log_dir,
+        enable_tensorboard=not disable_tensorboard
     )
     
     # 3. 设置训练参数
@@ -523,11 +618,11 @@ def main(
     ]
     
     for sentence in test_sentences:
-        translation = inference.translate(sentence, max_length=30)
+        translation, inference_time = inference.translate(sentence, max_length=30)
         print(f"EN: {sentence}")
         print(f"ZH: {translation}")
+        print(f"推理时间: {inference_time:.3f} 秒")
         print("-" * 50)
-
 
 if __name__ == "__main__":
     app()

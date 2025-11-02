@@ -177,6 +177,7 @@ class Transformer(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.seq_len = seq_len
+        self.n_heads = n_heads
         self.encoder = nn.ModuleList(
             [Encoder(d_model, seq_len, n_heads, d_hidden) for _ in range(stack)]
         )
