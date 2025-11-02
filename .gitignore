@@ -11,7 +11,7 @@ wheels/
 docs_private/
 runs/
 data/
-note.md
+note*.md
 *.pth
 .DS_Store
 temp_cleaned_data.csv

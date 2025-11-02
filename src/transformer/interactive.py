@@ -31,8 +31,27 @@ def interactive_evaluation(model_path: str, device: str = None):
             stack=model_config.get('stack', 6)
         )
         
-        # 加载模型权重
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # 加载模型权重，处理不匹配的参数
+        model_state_dict = checkpoint['model_state_dict']
+        current_model_keys = set(model.state_dict().keys())
+        checkpoint_keys = set(model_state_dict.keys())
+        
+        # 找出不匹配的键
+        unexpected_keys = checkpoint_keys - current_model_keys
+        missing_keys = current_model_keys - checkpoint_keys
+        
+        if unexpected_keys:
+            print(f"警告: 检查点中存在意外的参数键: {unexpected_keys}")
+            # 过滤掉不匹配的键
+            filtered_state_dict = {k: v for k, v in model_state_dict.items() if k in current_model_keys}
+            model.load_state_dict(filtered_state_dict, strict=False)
+        else:
+            model.load_state_dict(model_state_dict)
+            
+        if missing_keys:
+            print(f"警告: 当前模型中缺少的参数键: {missing_keys}")
+            print("这些参数将使用默认初始化值")
+            
         model.to(device)
         model.eval()
         
