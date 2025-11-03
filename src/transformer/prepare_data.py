@@ -1,33 +1,13 @@
 import torch
 import pandas as pd
 import re
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from datasets import load_dataset  # Hugging Face数据集加载工具
 import tiktoken  # OpenAI分词器
 from typing import Optional, Tuple, Dict, Any
-from dataclasses import dataclass
 
-
-@dataclass
-class DataConfig:
-    """数据处理配置类"""
-    max_samples: int = 1000
-    batch_size: int = 16
-    en_max_len: Optional[int] = None
-    zh_max_len: Optional[int] = None
-    length_percentile: float = 0.95  # 用于自动确定最大长度的百分位数
-    dataset_name: str = "Helsinki-NLP/opus-100"
-    dataset_config: str = "en-zh"
-    verbose: bool = True
-
-
-# 参考 openai_public.py 定义特殊标记
-SPECIAL_TOKENS = {
-    "<pad>": 100257,  # 填充标记，原本为 <|endoftext|>，这里不使用
-    "<bos>": 100258,  # 句首标记（目标序列），原本为 <|fim_prefix|>，这里不使用
-    "<eos>": 100259,  # 句尾标记（目标序列），原本为 <|fim_middle|>，这里不使用
-    "<unk>": 0        # tiktoken默认未知标记ID
-}
+from config import DataConfig, SPECIAL_TOKENS
+from util.ddp_helper import log_with_rank, EnvConfig
 
 
 class TranslationDataset(Dataset):
@@ -48,18 +28,18 @@ class TranslationDataset(Dataset):
 class TranslationDataProcessor:
     """翻译数据处理器 - 只能通过 create_translation_dataloader 创建"""
     
-    def __init__(self, config: DataConfig):
+    def __init__(self, config: DataConfig, env_config: EnvConfig):
         self.config = config
-        self._tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.env_config = env_config
+        self.rank = env_config.rank if env_config is not None else None
+        self._tokenizer = self._get_tokenizer()
+        self._filtered_samples = []  # 存储被过滤的样本
         self._df = None
         self._stats = None
-        # 用于收集被过滤的数据样本（用于verbose模式）
-        self._filtered_samples = {
-            'contains_original': [],  # 翻译中包含原文
-            'too_short': [],         # 太短且无意义
-            'not_translated': []     # 完全没有翻译
-        }
-    
+
+    def _get_tokenizer(self):
+        return tiktoken.get_encoding("cl100k_base")
+
     def _clean_text(self, text: str, is_english: bool = True) -> str:
         """轻量清洗：保留有效字符，去除冗余空格"""
         if not text:
@@ -94,20 +74,9 @@ class TranslationDataProcessor:
         
         # 如果英文句子长度超过5个字符，且完整出现在中文翻译中，则过滤
         if len(en_clean_for_check) > 5 and en_clean_for_check in zh_clean_for_check:
-            if self.config.verbose and len(self._filtered_samples['contains_original']) < 10:
-                self._filtered_samples['contains_original'].append((en_text, zh_text))
+            if self.config.verbose and len(self._filtered_samples) < 10:
+                self._filtered_samples.append((en_text, zh_text, "contains_original"))
             return False
-        
-        # 规则2: 过滤太短且无明确含义的句子
-        # 计算有效字符数（排除标点和空格）
-        # en_meaningful_chars = len(re.sub(r'[^\w\u4e00-\u9fa5]', '', en_text))
-        # zh_meaningful_chars = len(re.sub(r'[^\w\u4e00-\u9fa5]', '', zh_text))
-        
-        # # 如果任一语言的有效字符数少于3个，则过滤
-        # if en_meaningful_chars < 3 or zh_meaningful_chars < 3:
-        #     if self.config.verbose and len(self._filtered_samples['too_short']) < 10:
-        #         self._filtered_samples['too_short'].append((en_text, zh_text))
-        #     return False
         
         # 规则3: 检查是否完全没有翻译（相似度过高）
         # 移除所有非字母数字字符，转为小写进行比较
@@ -116,8 +85,8 @@ class TranslationDataProcessor:
         
         # 如果两个文本完全相同或中文中英文字符占比过高，则过滤
         if en_normalized == zh_normalized:
-            if self.config.verbose and len(self._filtered_samples['not_translated']) < 10:
-                self._filtered_samples['not_translated'].append((en_text, zh_text))
+            if self.config.verbose and len(self._filtered_samples) < 10:
+                self._filtered_samples.append((en_text, zh_text, "not_translated"))
             return False
         
         # 检查中文翻译中英文字符的比例
@@ -128,8 +97,8 @@ class TranslationDataProcessor:
         
         # 如果中文翻译中英文字符占比超过70%，则认为翻译质量不佳
         if zh_total_chars > 0 and zh_english_chars / zh_total_chars > 0.7:
-            if self.config.verbose and len(self._filtered_samples['not_translated']) < 10:
-                self._filtered_samples['not_translated'].append((en_text, zh_text))
+            if self.config.verbose and len(self._filtered_samples) < 10:
+                self._filtered_samples.append((en_text, zh_text, "not_translated_english_ratio"))
             return False
         
         return True
@@ -141,24 +110,30 @@ class TranslationDataProcessor:
         
         print("\n=== 质量过滤详细信息 ===")
         
-        # 规则1: 翻译中包含原文
-        if self._filtered_samples['contains_original']:
-            print(f"\n规则1 - 翻译中包含原文 (前{len(self._filtered_samples['contains_original'])}条):")
-            for i, (en, zh) in enumerate(self._filtered_samples['contains_original'], 1):
+        # 按照过滤原因分类并打印
+        filtered_by_reason = {
+            "contains_original": [],
+            "not_translated": [],
+            "not_translated_english_ratio": []
+        }
+        for en, zh, reason in self._filtered_samples:
+            filtered_by_reason[reason].append((en, zh))
+
+        if filtered_by_reason["contains_original"]:
+            print(f"\n规则1 - 翻译中包含原文 (前{len(filtered_by_reason["contains_original"])}条):")
+            for i, (en, zh) in enumerate(filtered_by_reason["contains_original"], 1):
                 print(f"  {i}. EN: {en}")
                 print(f"     ZH: {zh}")
         
-        # 规则2: 太短且无意义
-        if self._filtered_samples['too_short']:
-            print(f"\n规则2 - 太短且无明确含义 (前{len(self._filtered_samples['too_short'])}条):")
-            for i, (en, zh) in enumerate(self._filtered_samples['too_short'], 1):
+        if filtered_by_reason["not_translated"]:
+            print(f"\n规则3 - 完全没有翻译 (前{len(filtered_by_reason["not_translated"])}条):")
+            for i, (en, zh) in enumerate(filtered_by_reason["not_translated"], 1):
                 print(f"  {i}. EN: {en}")
                 print(f"     ZH: {zh}")
-        
-        # 规则3: 完全没有翻译
-        if self._filtered_samples['not_translated']:
-            print(f"\n规则3 - 完全没有翻译 (前{len(self._filtered_samples['not_translated'])}条):")
-            for i, (en, zh) in enumerate(self._filtered_samples['not_translated'], 1):
+
+        if filtered_by_reason["not_translated_english_ratio"]:
+            print(f"\n规则3 - 中文翻译中英文字符占比过高 (前{len(filtered_by_reason["not_translated_english_ratio"])}条):")
+            for i, (en, zh) in enumerate(filtered_by_reason["not_translated_english_ratio"], 1):
                 print(f"  {i}. EN: {en}")
                 print(f"     ZH: {zh}")
         
@@ -214,7 +189,7 @@ class TranslationDataProcessor:
     
     def _load_dataset(self, split: str = "train") -> pd.DataFrame:
         """加载数据集"""
-        print(f"正在加载数据集 ({split})...")
+        log_with_rank(f"正在加载数据集 ({split})...", self.rank)
         dataset = load_dataset(self.config.dataset_name, self.config.dataset_config)
         
         # 提取英文和中文句子
@@ -235,11 +210,7 @@ class TranslationDataProcessor:
         initial_count = len(df)
         
         # 重置过滤样本收集器
-        self._filtered_samples = {
-            'contains_original': [],
-            'too_short': [],
-            'not_translated': []
-        }
+        self._filtered_samples = []
         
         # 应用清洗
         df["en_clean"] = df["en"].apply(lambda x: self._clean_text(x, is_english=True))
@@ -373,12 +344,21 @@ class TranslationDataProcessor:
         train_dataset = TranslationDataset(train_df)
         val_dataset = TranslationDataset(val_df)
         test_dataset = TranslationDataset(test_df)
-        
+
+        train_sampler, val_sampler, test_sampler = None, None, None
+        shuffle = True
+        if self.env_config and self.env_config.world_size > 1:
+            train_sampler = DistributedSampler(train_dataset, num_replicas=self.env_config.world_size, rank=self.rank, shuffle=True)
+            val_sampler = DistributedSampler(val_dataset, num_replicas=self.env_config.world_size, rank=self.rank, shuffle=False)
+            test_sampler = DistributedSampler(test_dataset, num_replicas=self.env_config.world_size, rank=self.rank, shuffle=False)
+            shuffle = False # Sampler 负责 shuffle
+
         # 创建数据加载器
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=self.config.batch_size,
-            shuffle=True,
+            shuffle=shuffle,
+            sampler=train_sampler,
             drop_last=True
         )
         
@@ -386,6 +366,7 @@ class TranslationDataProcessor:
             val_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
+            sampler=val_sampler,
             drop_last=False
         )
         
@@ -393,6 +374,7 @@ class TranslationDataProcessor:
             test_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
+            sampler=test_sampler,
             drop_last=False
         )
         
@@ -412,36 +394,6 @@ class TranslationDataProcessor:
             print(f"处理后中文长度：{len(sample_data['zh_processed'])}")
             
         return train_dataloader, val_dataloader, test_dataloader
-    
-    def create_dataloader(self, split: str = "train") -> DataLoader:
-        """创建单个数据加载器"""
-        df, stats = self._process_data(split)
-        
-        # 创建数据集
-        dataset = TranslationDataset(df)
-        
-        # 创建数据加载器
-        dataloader = DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            shuffle=(split == "train"),  # 只有训练集需要shuffle
-            drop_last=(split == "train")  # 只有训练集需要drop_last
-        )
-        
-        if self.config.verbose:
-            print(f"\n=== {split} 数据集统计信息 ===")
-            print(f"统计: {stats}")
-            
-            sample_data = self._get_sample_data(df)
-            print(f"\n数据示例（来自{split}集）：")
-            print(f"英文原句：{sample_data['en_clean']}")
-            print(f"英文ID序列：{sample_data['en_token_ids']}")
-            print(f"中文原句：{sample_data['zh_clean']}")
-            print(f"中文ID序列：{sample_data['zh_token_ids']}")
-            print(f"处理后英文长度：{len(sample_data['en_processed'])}")
-            print(f"处理后中文长度：{len(sample_data['zh_processed'])}")
-            
-        return dataloader
     
     def _get_sample_data(self, df: pd.DataFrame = None) -> Dict[str, Any]:
         """获取样本数据用于展示"""
@@ -468,7 +420,8 @@ def create_translation_dataloaders(
     en_max_len: Optional[int] = None,
     zh_max_len: Optional[int] = None,
     length_percentile: float = 0.95,
-    verbose=True
+    verbose=True,
+    env_config=None
 ) -> Tuple[DataLoader, DataLoader, DataLoader, TranslationDataProcessor]:
     """
     工厂方法：创建训练、验证、测试数据加载器
@@ -487,45 +440,14 @@ def create_translation_dataloaders(
         length_percentile=length_percentile,
         verbose=verbose
     )
-    processor = TranslationDataProcessor(config)
+    processor = TranslationDataProcessor(config, env_config)
     train_dataloader, val_dataloader, test_dataloader = processor.create_dataloaders()
     return train_dataloader, val_dataloader, test_dataloader, processor
 
 
-def create_translation_dataloader(
-    max_samples: int = 1000,
-    batch_size: int = 16,
-    en_max_len: Optional[int] = None,
-    zh_max_len: Optional[int] = None,
-    length_percentile: float = 0.95,
-    split: str = "train",
-    verbose=True
-) -> Tuple[DataLoader, TranslationDataProcessor]:
-    """
-    工厂方法：创建单个翻译数据加载器
-    
-    Args:
-        split: 数据集切分，可选 "train", "validation", "test"
-    
-    Returns:
-        dataloader: 数据加载器
-        processor: 数据处理器实例
-    """
-    config = DataConfig(
-        max_samples=max_samples,
-        batch_size=batch_size,
-        en_max_len=en_max_len,
-        zh_max_len=zh_max_len,
-        length_percentile=length_percentile,
-        verbose=verbose
-    )
-    processor = TranslationDataProcessor(config)
-    return processor.create_dataloader(split), processor
-
-
 def main():
     # 使用便捷函数快速创建数据加载器
-    dataloader, _ = create_translation_dataloader(
+    dataloader, _, _, _ = create_translation_dataloaders(
         max_samples=100,
         batch_size=8,
         length_percentile=0.9,  # 使用p90作为最大长度
