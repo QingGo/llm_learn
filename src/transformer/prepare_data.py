@@ -6,7 +6,7 @@ from datasets import load_dataset  # Hugging Face数据集加载工具
 import tiktoken  # OpenAI分词器
 from typing import Optional, Tuple, Dict, Any
 
-from config import DataConfig, SPECIAL_TOKENS
+from .config import DataConfig, SPECIAL_TOKENS
 from util.ddp_helper import log_with_rank, EnvConfig
 
 
@@ -160,12 +160,6 @@ class TranslationDataProcessor:
         
         return processed
     
-    def create_padding_mask(self, sequences: torch.Tensor, pad_token_id: int) -> torch.Tensor:
-        """创建padding掩码"""
-        # sequences: [batch_size, seq_len]
-        # 返回: [batch_size, seq_len] 其中True表示padding位置
-        return sequences == pad_token_id
-    
     def decode_tokens(self, token_ids: list, remove_special_tokens: bool = True) -> str:
         """将token_ids还原成文本"""
         if not token_ids:
@@ -190,7 +184,7 @@ class TranslationDataProcessor:
     def _load_dataset(self, split: str = "train") -> pd.DataFrame:
         """加载数据集"""
         log_with_rank(f"正在加载数据集 ({split})...", self.rank)
-        dataset = load_dataset(self.config.dataset_name, self.config.dataset_config)
+        dataset = load_dataset(self.config.dataset_name, self.config.dataset_config, cache_dir='./data')
         
         # 提取英文和中文句子
         en_sentences = [item["translation"]["en"] for item in dataset[split]]
@@ -288,8 +282,9 @@ class TranslationDataProcessor:
         df["en_processed"] = df["en_token_ids"].apply(
             lambda x: self._process_sequence_tokens(x, is_target=False, max_len=en_max_len)
         )
+        # max_len 加 1， decoder 输入/输出需要去掉最后一个/第一个token，这时又能回到 max_len
         df["zh_processed"] = df["zh_token_ids"].apply(
-            lambda x: self._process_sequence_tokens(x, is_target=True, max_len=zh_max_len)
+            lambda x: self._process_sequence_tokens(x, is_target=True, max_len=zh_max_len+1)
         )
         return df
     

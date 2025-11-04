@@ -24,21 +24,40 @@ class TranslationTrainer:
     """翻译模型训练器"""
     
     def __init__(self, model: Transformer, env_config: EnvConfig, log_dir: str = None, enable_tensorboard: bool = True, verbose: bool = True):
+        # DDP 配置
         self.env_config = env_config
-        self.rank = env_config.rank if env_config.rank is not None else 0
         self.device, _, _ = get_device_for_ddp(env_config.rank, env_config.world_size)
-        
+        self.rank = env_config.rank if env_config.rank is not None else 0
+        self.world_size = env_config.world_size if env_config.world_size is not None else 1
+
+        log_with_rank(f"初始化翻译模型训练器，device: {self.device}，DDP 配置: {self.env_config}", self.rank)
+        # DDP 模型封装
         model = model.to(self.device)
-        if env_config.world_size > 1:
+        if self.world_size > 1:
             # 在DDP中，需要指定find_unused_parameters=True，因为Transformer的decoder的因果掩码会使得某些参数在某些前向传播中不被使用
             self.model = DistributedDataParallel(model, device_ids=[self.device] if self.device.type == 'cuda' else None, find_unused_parameters=True)
         else:
             self.model = model
 
-        self.rank = env_config.rank
-        self.world_size = env_config.world_size
+       # TensorBoard 设置
+        self.enable_tensorboard = enable_tensorboard
+        self.writer = None
+        if self.enable_tensorboard and self.rank == 0:
+            self.writer = SummaryWriter(log_dir=log_dir)
+            # 添加模型图
+            self.writer.add_graph(model, (
+                torch.zeros((16, model.seq_len), dtype=torch.long, device=self.device),
+                torch.ones((16, model.seq_len), dtype=torch.long, device=self.device),
+                torch.ones((16, model.seq_len), dtype=torch.bool, device=self.device),
+                torch.ones((16, model.seq_len), dtype=torch.bool, device=self.device),
+                ))
+            print(f"TensorBoard 日志将保存到: {log_dir}")
+
+        # 需要 setup_training 初始化的优化器和损失函数
         self.optimizer = None
         self.criterion = None
+
+        # 日志记录
         self.train_losses = []
         self.val_losses = []
         self.train_perplexities = []
@@ -46,13 +65,6 @@ class TranslationTrainer:
         self.best_val_loss = float('inf')
         self.step_count = 0  # 添加步数计数器
         self.verbose = verbose and self.rank == 0
-        
-        # TensorBoard 设置
-        self.enable_tensorboard = enable_tensorboard
-        self.writer = None
-        if self.enable_tensorboard and self.rank == 0:
-            self.writer = SummaryWriter(log_dir=log_dir)
-            print(f"TensorBoard 日志将保存到: {log_dir}")
         
         if self.verbose:
             # 初始化training_losses.txt文件
@@ -65,6 +77,12 @@ class TranslationTrainer:
         with open('logs/training_losses.txt', 'w', encoding='utf-8') as f:
             f.write('Step,Loss\n')
     
+    def _create_padding_mask(self, sequences: torch.Tensor, pad_token_id: int) -> torch.Tensor:
+        """创建padding掩码"""
+        # sequences: [batch_size, seq_len]
+        # 返回: [batch_size, seq_len] 其中True表示padding位置
+        return sequences == pad_token_id
+
     def setup_training(self, learning_rate: float = 1e-4, weight_decay: float = 1e-5):
         """设置训练参数"""
         self.optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -405,16 +423,10 @@ class TranslationTrainer:
         plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-def create_model_and_trainer(vocab_size: int = 100260, d_model: int = 512, seq_len: int = 128, 
+def create_model_and_trainer(vocab_size: int = 100260, d_model: int = 512, seq_len: int = 100, 
                            n_heads: int = 8, d_hidden: int = 2048, stack: int = 6, 
                            env_config: EnvConfig = None, log_dir: str = 'runs/transformer', 
-                           enable_tensorboard: bool = True) -> Tuple[Transformer, TranslationTrainer]:
-    """创建模型和训练器的工厂函数"""
-    if env_config is None:
-        env_config = get_env_config()
-
-    device, _, _ = get_device_for_ddp(env_config.rank, env_config.world_size)
-    
+                           enable_tensorboard: bool = True) -> Tuple[Transformer, TranslationTrainer]:    
     # 创建模型
     model = Transformer(
         vocab_size=vocab_size,
@@ -438,6 +450,7 @@ def main(
     max_samples: int = typer.Option(1000, help="最大样本数量"),
     batch_size: int = typer.Option(16, help="批次大小"),
     length_percentile: float = typer.Option(0.9, help="长度百分位数"),
+    max_len: int = typer.Option(100, help="固定序列长度"),
     num_epochs: int = typer.Option(10, help="训练轮数"),
     log_dir: Optional[str] = typer.Option('./runs/translation_training', help="TensorBoard 日志目录"),
     disable_tensorboard: bool = typer.Option(False, help="禁用 TensorBoard 记录"),
@@ -461,7 +474,9 @@ def main(
     train_dataloader, val_dataloader, test_dataloader, processor = create_translation_dataloaders(
         max_samples=max_samples,
         batch_size=batch_size,
-        length_percentile=length_percentile,
+        # length_percentile=length_percentile,
+        en_max_len=max_len,
+        zh_max_len=max_len,
         verbose=True,
         env_config=env_config
     )
@@ -478,7 +493,7 @@ def main(
         model, trainer = create_model_and_trainer(
             vocab_size=model_config.get('vocab_size', 100260),
             d_model=model_config.get('d_model', 512),
-            seq_len=model_config.get('seq_len', 64),
+            seq_len=model_config.get('seq_len', 100),
             n_heads=model_config.get('n_heads', 8),
             d_hidden=model_config.get('d_hidden', 2048),
             stack=model_config.get('stack', 6),
@@ -491,7 +506,7 @@ def main(
         model, trainer = create_model_and_trainer(
             vocab_size=100260,  # tiktoken词汇表大小 + 特殊token
             d_model=512,
-            seq_len=64,  # 根据数据统计调整
+            seq_len=100,  # 根据数据统计调整
             n_heads=8,
             d_hidden=2048,
             stack=6,

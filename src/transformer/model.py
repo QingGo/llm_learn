@@ -11,6 +11,7 @@ class AttentionUnit(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.use_mask = use_mask
+        self.seq_len = seq_len
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         # Scaled Dot-Product Attention，里 d_q 一定等于 d_k，Additive attention 则不一定。3.2.1
         self.d_q = d_model // n_heads
@@ -31,56 +32,51 @@ class AttentionUnit(nn.Module):
 
     def forward(self, q_input, k_input, v_input, key_padding_mask: Optional[torch.Tensor] = None):
         # 输入验证
-        batch_size, q_seq_len, d_model = q_input.shape
-        _, k_seq_len, _ = k_input.shape
-        _, v_seq_len, _ = v_input.shape
+        batch_size, _, _ = q_input.shape
         
-        assert k_seq_len == v_seq_len, "Key and Value sequence lengths must match"
-        assert d_model == self.d_model, f"Input d_model {d_model} doesn't match expected {self.d_model}"
         
         # 1. 线性变换得到Q、K、V
         # q_input/k_input/v_input: [batch_size, seq_len, d_model]
-        Q = self.w_q(q_input)  # [bs, q_seq_len, d_model]
-        K = self.w_k(k_input)  # [bs, k_seq_len, d_model]
-        V = self.w_v(v_input)  # [bs, v_seq_len, d_model]
+        Q = self.w_q(q_input)  # [bs, seq_len, d_model]
+        K = self.w_k(k_input)  # [bs, seq_len, d_model]
+        V = self.w_v(v_input)  # [bs, seq_len, d_model]
 
-        Q_multi = Q.view(batch_size, q_seq_len, self.n_heads, self.d_q).transpose(
+        Q_multi = Q.view(batch_size, self.seq_len, self.n_heads, self.d_q).transpose(
             1, 2
-        )  # [bs, n_heads, q_seq_len, d_q]
-        K_multi = K.view(batch_size, k_seq_len, self.n_heads, self.d_k).transpose(
+        )  # [bs, n_heads, seq_len, d_q]
+        K_multi = K.view(batch_size, self.seq_len, self.n_heads, self.d_k).transpose(
             1, 2
-        )  # [bs, n_heads, k_seq_len, d_k]
-        V_multi = V.view(batch_size, v_seq_len, self.n_heads, self.d_v).transpose(
+        )  # [bs, n_heads, seq_len, d_k]
+        V_multi = V.view(batch_size, self.seq_len, self.n_heads, self.d_v).transpose(
             1, 2
-        )  # [bs, n_heads, v_seq_len, d_v]
+        )  # [bs, n_heads, seq_len, d_v]
 
         # 2. 计算注意力分数：Q*K^T / √d_k
         attention_scores = torch.matmul(
             Q_multi, K_multi.transpose(-1, -2)
-        )  # [bs, n_heads, q_seq_len, k_seq_len]
+        )  # [bs, n_heads, seq_len, seq_len]
         attention_scores = attention_scores / math.sqrt(self.d_k)  # 缩放
 
         # 3. 应用掩码，Masked Multi-Head Attention 中使用
         if self.use_mask:
             # 创建因果掩码，确保维度匹配
-            mask = torch.triu(torch.ones(q_seq_len, k_seq_len, device=q_input.device, dtype=torch.bool), diagonal=1)
+            mask = torch.triu(torch.ones(self.seq_len, self.seq_len, device=q_input.device, dtype=torch.bool), diagonal=1)
             # 扩展到batch和head维度
-            mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, q_seq_len, k_seq_len]
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
             attention_scores = attention_scores.masked_fill(mask, float("-inf"))
             
         if key_padding_mask is not None:
-            # key_padding_mask: [bs, k_seq_len] -> [bs, 1, 1, k_seq_len]
+            # key_padding_mask: [bs, seq_len] -> [bs, 1, 1, seq_len]
             key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attention_scores = attention_scores.masked_fill(key_padding_mask, float("-inf"))
 
         # 4. 计算注意力权重（softmax+dropout），对每个 Q 关联的所有 K 的注意力分数进行归一化
         # 数值稳定性：检查是否所有值都是-inf
-        if torch.all(torch.isinf(attention_scores)):
-            # 如果所有值都是-inf，创建均匀分布的注意力权重
-            attention_probs = torch.ones_like(attention_scores) / k_seq_len
-        else:
-            attention_probs = torch.softmax(attention_scores, dim=-1)  # [bs, n_heads, q_seq_len, k_seq_len]
-        
+        attention_probs = torch.where(
+            torch.all(torch.isinf(attention_scores)), 
+            torch.ones_like(attention_scores) / attention_scores.size(-1),
+            torch.softmax(attention_scores, dim=-1)
+        ) # [bs, n_heads, seq_len, seq_len] 
         attention_probs = self.dropout(attention_probs)  # 应用dropout
 
         # 5. 加权求和得到注意力输出
@@ -88,11 +84,11 @@ class AttentionUnit(nn.Module):
 
         # 6. 合并多头输出
         output = (
-            output.transpose(1, 2).contiguous().view(batch_size, q_seq_len, self.d_model)
-        )  # [bs, q_seq_len, d_model]
+            output.transpose(1, 2).contiguous().view(batch_size, self.seq_len, self.d_model)
+        )  # [bs, seq_len, d_model]
 
         # 7. 输出线性变换
-        output = self.w_o(output)  # [bs, q_seq_len, d_model]
+        output = self.w_o(output)  # [bs, seq_len, d_model]
 
         return output
 
@@ -173,6 +169,7 @@ class Transformer(nn.Module):
         n_heads: int = 1,
         d_hidden=2048,
         stack: int = 6,
+        pos_encoding_cache = False
     ):
         super().__init__()
         self.d_model = d_model
@@ -192,55 +189,60 @@ class Transformer(nn.Module):
         self.output_linear.weight = self.embedding.weight
         
         # 位置编码缓存
-        self.register_buffer('pos_encoding_cache', None)
-        self.cached_seq_len = 0
+        self.pos_encoding_cache = pos_encoding_cache
+        if pos_encoding_cache:
+            self.register_buffer('pos_encoding_cache', None)
+            self.cached_seq_len = 0
 
         # embedding dropout
         self.decoder_embed_dropout = nn.Dropout(p=0.1)
         self.encoder_embed_dropout = nn.Dropout(p=0.1)
 
     def forward(self, x, y, x_padding_mask=None, y_padding_mask=None):
-        x_seq_len = x.shape[1]
-        y_seq_len = y.shape[1]
-
         x = self.embedding(x)  # [bs, seq_len, d_model]
         x = x * self.embed_scale
-        x = x + self._pos_encoding(x_seq_len, device=x.device)
+        x = x + self._pos_encoding(self.seq_len, device=x.device)
         x = self.encoder_embed_dropout(x)
         for encoder in self.encoder:
             x = encoder(x, x_padding_mask)
         y = self.embedding(y)  # [bs, seq_len, d_model]
         y = y * self.embed_scale
-        y = y + self._pos_encoding(y_seq_len, device=y.device)  # 修复设备问题
+        y = y + self._pos_encoding(self.seq_len, device=y.device)  # 修复设备问题
         y = self.decoder_embed_dropout(y)
         for decoder in self.decoder:
             y = decoder(y, x, x, y_padding_mask)  # [bs, seq_len, d_model]
         logits = self.output_linear(y)  # [bs, seq_len, vocab_size]
         return logits
 
+    def _pos_encoding_no_cache(self, seq_len, device):
+        # 位置编码计算
+        pos = torch.arange(0, seq_len, dtype=torch.float32, device=device).unsqueeze(1)
+
+        # 修复位置编码计算
+        i = torch.arange(0, self.d_model, step=2, dtype=torch.float32, device=device)
+        angle = pos / torch.pow(10000, 2 * i / self.d_model)  # 修复公式
+        
+        pos_encoding = torch.zeros(seq_len, self.d_model, device=device)
+        pos_encoding[:, 0::2] = torch.sin(angle)
+        
+        # 处理奇数d_model的情况
+        if self.d_model % 2 == 1:
+            pos_encoding[:, 1::2] = torch.cos(angle[:, :-1])
+        else:
+            pos_encoding[:, 1::2] = torch.cos(angle)
+        
+        return pos_encoding
+
     def _pos_encoding(self, seq_len, device):
         # 使用缓存优化性能
-        if self.pos_encoding_cache is None or seq_len > self.cached_seq_len:
-            max_len = max(seq_len, self.seq_len)
-            pos = torch.arange(0, max_len, dtype=torch.float32, device=device).unsqueeze(1)
-            
-            # 修复位置编码计算
-            i = torch.arange(0, self.d_model, step=2, dtype=torch.float32, device=device)
-            angle = pos / torch.pow(10000, 2 * i / self.d_model)  # 修复公式
-            
-            pos_encoding = torch.zeros(max_len, self.d_model, device=device)
-            pos_encoding[:, 0::2] = torch.sin(angle)
-            
-            # 处理奇数d_model的情况
-            if self.d_model % 2 == 1:
-                pos_encoding[:, 1::2] = torch.cos(angle[:, :-1])
-            else:
-                pos_encoding[:, 1::2] = torch.cos(angle)
-            
-            self.register_buffer('pos_encoding_cache', pos_encoding)
-            self.cached_seq_len = max_len
-        
-        return self.pos_encoding_cache[:seq_len]
+        if self.pos_encoding_cache:
+            if seq_len > self.cached_seq_len:
+                pos_encoding = self._pos_encoding_no_cache(seq_len, device)
+                self.register_buffer('pos_encoding_cache', pos_encoding)
+                self.cached_seq_len = seq_len
+            return self.pos_encoding_cache[:seq_len]
+        else:
+            return self._pos_encoding_no_cache(seq_len, device)
 
 if __name__ == "__main__":
     transformer = Transformer(

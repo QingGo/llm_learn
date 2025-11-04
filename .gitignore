@@ -19,3 +19,4 @@ temp_processed_data*.csv
 training_losses.txt
 .pytest_cache
 translation_checkpoints/
+graph/
