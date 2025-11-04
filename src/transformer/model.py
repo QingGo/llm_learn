@@ -11,6 +11,7 @@ class AttentionUnit(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.use_mask = use_mask
+        # seq_len 仅用于初始化时的参考，前向中改为动态长度
         self.seq_len = seq_len
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         # Scaled Dot-Product Attention，里 d_q 一定等于 d_k，Additive attention 则不一定。3.2.1
@@ -31,23 +32,29 @@ class AttentionUnit(nn.Module):
         self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, q_input, k_input, v_input, key_padding_mask: Optional[torch.Tensor] = None):
-        # 输入验证
-        batch_size, _, _ = q_input.shape
-        
-        
+        # 输入验证与动态长度
+        batch_size, q_len, q_dim = q_input.shape
+        k_len = k_input.size(1)
+        v_len = v_input.size(1)
+        # d_model 验证
+        assert q_dim == self.d_model and k_input.size(-1) == self.d_model and v_input.size(-1) == self.d_model, "Input d_model must match module d_model"
+        # K/V 长度匹配验证
+        assert k_len == v_len, "Key and Value sequence lengths must match"
+
         # 1. 线性变换得到Q、K、V
         # q_input/k_input/v_input: [batch_size, seq_len, d_model]
         Q = self.w_q(q_input)  # [bs, seq_len, d_model]
         K = self.w_k(k_input)  # [bs, seq_len, d_model]
         V = self.w_v(v_input)  # [bs, seq_len, d_model]
 
-        Q_multi = Q.view(batch_size, self.seq_len, self.n_heads, self.d_q).transpose(
+        # 动态按当前序列长度拆分多头
+        Q_multi = Q.view(batch_size, q_len, self.n_heads, self.d_q).transpose(
             1, 2
         )  # [bs, n_heads, seq_len, d_q]
-        K_multi = K.view(batch_size, self.seq_len, self.n_heads, self.d_k).transpose(
+        K_multi = K.view(batch_size, k_len, self.n_heads, self.d_k).transpose(
             1, 2
         )  # [bs, n_heads, seq_len, d_k]
-        V_multi = V.view(batch_size, self.seq_len, self.n_heads, self.d_v).transpose(
+        V_multi = V.view(batch_size, v_len, self.n_heads, self.d_v).transpose(
             1, 2
         )  # [bs, n_heads, seq_len, d_v]
 
@@ -59,14 +66,16 @@ class AttentionUnit(nn.Module):
 
         # 3. 应用掩码，Masked Multi-Head Attention 中使用
         if self.use_mask:
-            # 创建因果掩码，确保维度匹配
-            mask = torch.triu(torch.ones(self.seq_len, self.seq_len, device=q_input.device, dtype=torch.bool), diagonal=1)
+            # 创建因果掩码，确保维度匹配（q_len x k_len）
+            i = torch.arange(q_len, device=q_input.device)
+            j = torch.arange(k_len, device=q_input.device)
+            mask = (j.unsqueeze(0) > i.unsqueeze(1))  # [q_len, k_len]
             # 扩展到batch和head维度
-            mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, q_len, k_len]
             attention_scores = attention_scores.masked_fill(mask, float("-inf"))
             
         if key_padding_mask is not None:
-            # key_padding_mask: [bs, seq_len] -> [bs, 1, 1, seq_len]
+            # key_padding_mask: [bs, k_len] -> [bs, 1, 1, k_len]
             key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attention_scores = attention_scores.masked_fill(key_padding_mask, float("-inf"))
 
@@ -84,8 +93,8 @@ class AttentionUnit(nn.Module):
 
         # 6. 合并多头输出
         output = (
-            output.transpose(1, 2).contiguous().view(batch_size, self.seq_len, self.d_model)
-        )  # [bs, seq_len, d_model]
+            output.transpose(1, 2).contiguous().view(batch_size, q_len, self.d_model)
+        )  # [bs, q_len, d_model]
 
         # 7. 输出线性变换
         output = self.w_o(output)  # [bs, seq_len, d_model]
@@ -141,14 +150,16 @@ class Decoder(nn.Module):
         self.layer_norm3 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(p=0.1)
 
-    def forward(self, x, k, v, key_padding_mask=None):
+    def forward(self, x, k, v, tgt_padding_mask=None, src_padding_mask=None):
         res_1 = x
-        x = self.masked_attention(x, x, x, key_padding_mask)
+        # 自注意力使用目标序列的 padding 掩码
+        x = self.masked_attention(x, x, x, tgt_padding_mask)
         x = self.dropout(x)
         x = x + res_1  # [bs, seq_len, d_model]
         x = self.layer_norm1(x)
         res_2 = x
-        x = self.attention(x, k, v)
+        # 交叉注意力使用源序列的 padding 掩码
+        x = self.attention(x, k, v, src_padding_mask)
         x = self.dropout(x)
         x = x + res_2
         x = self.layer_norm2(x)
@@ -169,13 +180,14 @@ class Transformer(nn.Module):
         n_heads: int = 1,
         d_hidden=2048,
         stack: int = 6,
-        pos_encoding_cache = False
+        use_pos_encoding_cache = True
     ):
         super().__init__()
         self.d_model = d_model
         self.seq_len = seq_len
         self.n_heads = n_heads
         self.d_hidden = d_hidden
+        self.use_pos_encoding_cache = use_pos_encoding_cache
         self.encoder = nn.ModuleList(
             [Encoder(d_model, seq_len, n_heads, d_hidden) for _ in range(stack)]
         )
@@ -188,11 +200,9 @@ class Transformer(nn.Module):
         self.output_linear = nn.Linear(d_model, vocab_size, bias=False)
         self.output_linear.weight = self.embedding.weight
         
-        # 位置编码缓存
-        self.pos_encoding_cache = pos_encoding_cache
-        if pos_encoding_cache:
-            self.register_buffer('pos_encoding_cache', None)
-            self.cached_seq_len = 0
+        # 位置编码缓存（默认开启）
+        self.register_buffer('pos_encoding_cache', None)
+        self.cached_seq_len = 0
 
         # embedding dropout
         self.decoder_embed_dropout = nn.Dropout(p=0.1)
@@ -201,16 +211,18 @@ class Transformer(nn.Module):
     def forward(self, x, y, x_padding_mask=None, y_padding_mask=None):
         x = self.embedding(x)  # [bs, seq_len, d_model]
         x = x * self.embed_scale
-        x = x + self._pos_encoding(self.seq_len, device=x.device)
+        # 使用实际序列长度的位置信息
+        x = x + self._pos_encoding(x.size(1), device=x.device)
         x = self.encoder_embed_dropout(x)
         for encoder in self.encoder:
             x = encoder(x, x_padding_mask)
         y = self.embedding(y)  # [bs, seq_len, d_model]
         y = y * self.embed_scale
-        y = y + self._pos_encoding(self.seq_len, device=y.device)  # 修复设备问题
+        # 使用实际序列长度的位置信息（修复设备问题）
+        y = y + self._pos_encoding(y.size(1), device=y.device)
         y = self.decoder_embed_dropout(y)
         for decoder in self.decoder:
-            y = decoder(y, x, x, y_padding_mask)  # [bs, seq_len, d_model]
+            y = decoder(y, x, x, tgt_padding_mask=y_padding_mask, src_padding_mask=x_padding_mask)  # [bs, seq_len, d_model]
         logits = self.output_linear(y)  # [bs, seq_len, vocab_size]
         return logits
 
@@ -234,8 +246,7 @@ class Transformer(nn.Module):
         return pos_encoding
 
     def _pos_encoding(self, seq_len, device):
-        # 使用缓存优化性能
-        if self.pos_encoding_cache:
+        if self.use_pos_encoding_cache:
             if seq_len > self.cached_seq_len:
                 pos_encoding = self._pos_encoding_no_cache(seq_len, device)
                 self.register_buffer('pos_encoding_cache', pos_encoding)

@@ -550,22 +550,24 @@ def main(
     )
     
     # 5. 测试推理
-    log_with_rank("4. 测试翻译...", rank, True)
-    inference = TranslationInference(model, processor, trainer.device)
-    
-    test_sentences = [
-        "Hello, how are you?",
-        "I love machine learning.",
-        "The weather is nice today.",
-        "Thank you for your help."
-    ]
-    
-    for sentence in test_sentences:
-        translation, inference_time = inference.translate(sentence, max_length=30)
-        print(f"EN: {sentence}")
-        print(f"ZH: {translation}")
-        print(f"推理时间: {inference_time:.3f} 秒")
-        print("-" * 50)
+    # 仅在主进程进行推理与打印，避免 DDP 模式重复输出
+    if trainer.rank == 0:
+        log_with_rank("4. 测试翻译...", rank, True)
+        inference = TranslationInference(model, processor, trainer.device)
+        
+        test_sentences = [
+            "Hello, how are you?",
+            "I love machine learning.",
+            "The weather is nice today.",
+            "Thank you for your help."
+        ]
+        
+        for sentence in test_sentences:
+            translation, inference_time = inference.translate(sentence, max_length=30)
+            print(f"EN: {sentence}")
+            print(f"ZH: {translation}")
+            print(f"推理时间: {inference_time:.3f} 秒")
+            print("-" * 50)
 
     # DDP模式下，所有进程同步后退出
     if env_config.world_size > 1:
