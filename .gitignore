@@ -20,3 +20,4 @@ training_losses.txt
 .pytest_cache
 translation_checkpoints/
 graph/
+tensorboard_diagnosis_report.txt

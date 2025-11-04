@@ -44,13 +44,13 @@ class TranslationTrainer:
         self.writer = None
         if self.enable_tensorboard and self.rank == 0:
             self.writer = SummaryWriter(log_dir=log_dir)
-            # 添加模型图
-            self.writer.add_graph(model, (
-                torch.zeros((16, model.seq_len), dtype=torch.long, device=self.device),
-                torch.ones((16, model.seq_len), dtype=torch.long, device=self.device),
-                torch.ones((16, model.seq_len), dtype=torch.bool, device=self.device),
-                torch.ones((16, model.seq_len), dtype=torch.bool, device=self.device),
-                ))
+            # 添加模型图，服务器上运行这段会静默退出，也捕获不到 Exception，原因未知，先注释掉
+            # self.writer.add_graph(model, (
+            #     torch.zeros((16, model.seq_len), dtype=torch.long, device=self.device),
+            #     torch.ones((16, model.seq_len), dtype=torch.long, device=self.device),
+            #     torch.ones((16, model.seq_len), dtype=torch.bool, device=self.device),
+            #     torch.ones((16, model.seq_len), dtype=torch.bool, device=self.device),
+            #     ))
             print(f"TensorBoard 日志将保存到: {log_dir}")
 
         # 需要 setup_training 初始化的优化器和损失函数
