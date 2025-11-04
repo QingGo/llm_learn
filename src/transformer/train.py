@@ -167,14 +167,24 @@ class TranslationTrainer:
         total_loss = 0
         total_tokens = 0
         with torch.no_grad():
-            for src, tgt, tgt_y, src_mask, tgt_mask in val_dataloader:
-                src, tgt, tgt_y, src_mask, tgt_mask = src.to(self.device), tgt.to(self.device), \
-                                                     tgt_y.to(self.device), src_mask.to(self.device), \
-                                                     tgt_mask.to(self.device)
-                output = self.model(src, tgt, src_mask, tgt_mask)
-                loss = self.criterion(output.contiguous().view(-1, output.size(-1)), tgt_y.contiguous().view(-1))
-                total_loss += loss.item() * tgt_y.numel()
-                total_tokens += tgt_y.numel()
+            for src_batch, tgt_batch in val_dataloader:
+                src_batch = src_batch.to(self.device)  # [batch_size, src_seq_len]
+                tgt_batch = tgt_batch.to(self.device)  # [batch_size, tgt_seq_len]
+
+                # 准备decoder输入和目标（与训练阶段一致）
+                decoder_input = tgt_batch[:, :-1]  # [batch_size, tgt_seq_len-1]
+                targets = tgt_batch[:, 1:]         # [batch_size, tgt_seq_len-1]
+
+                # 创建padding mask
+                src_padding_mask = self._create_padding_mask(src_batch, 100257)
+                tgt_padding_mask = self._create_padding_mask(decoder_input, 100257)
+
+                # 前向与损失
+                logits = self.model(src_batch, decoder_input, src_padding_mask, tgt_padding_mask)
+                loss = self.criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+
+                total_loss += loss.item() * targets.numel()
+                total_tokens += targets.numel()
 
         # DDP: 聚合所有进程的损失和token数量
         if dist.is_initialized():
@@ -212,15 +222,25 @@ class TranslationTrainer:
         with torch.no_grad():
             # 只有主进程显示进度条
             dataloader_iter = tqdm(test_dataloader, desc='Testing') if self.rank == 0 else test_dataloader
-            
-            for src, tgt, tgt_y, src_mask, tgt_mask in dataloader_iter:
-                src, tgt, tgt_y, src_mask, tgt_mask = src.to(self.device), tgt.to(self.device), \
-                                                     tgt_y.to(self.device), src_mask.to(self.device), \
-                                                     tgt_mask.to(self.device)
-                output = self.model(src, tgt, src_mask, tgt_mask)
-                loss = self.criterion(output.contiguous().view(-1, output.size(-1)), tgt_y.contiguous().view(-1))
-                total_loss += loss.item() * tgt_y.numel()
-                total_tokens += tgt_y.numel()
+
+            for src_batch, tgt_batch in dataloader_iter:
+                src_batch = src_batch.to(self.device)  # [batch_size, src_seq_len]
+                tgt_batch = tgt_batch.to(self.device)  # [batch_size, tgt_seq_len]
+
+                # 准备decoder输入和目标
+                decoder_input = tgt_batch[:, :-1]  # [batch_size, tgt_seq_len-1]
+                targets = tgt_batch[:, 1:]         # [batch_size, tgt_seq_len-1]
+
+                # 创建padding mask
+                src_padding_mask = self._create_padding_mask(src_batch, 100257)
+                tgt_padding_mask = self._create_padding_mask(decoder_input, 100257)
+
+                # 前向与损失
+                logits = self.model(src_batch, decoder_input, src_padding_mask, tgt_padding_mask)
+                loss = self.criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+
+                total_loss += loss.item() * targets.numel()
+                total_tokens += targets.numel()
 
         # DDP: 聚合所有进程的损失和token数量
         if dist.is_initialized():
