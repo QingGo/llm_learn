@@ -21,3 +21,4 @@ training_losses.txt
 translation_checkpoints/
 graph/
 tensorboard_diagnosis_report.txt
+download/

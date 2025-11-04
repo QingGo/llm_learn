@@ -377,8 +377,10 @@ class TranslationTrainer:
     def load_model(self, filepath: str, load_optimizer: bool = True):
         """加载模型和训练状态"""
         checkpoint = torch.load(filepath, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        
+        # 与保存时一致：如果是DDP包装的，解包后加载；忽略额外键以兼容旧checkpoint
+        model_to_load = self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
+        model_to_load.load_state_dict(checkpoint['model_state_dict'], strict=False)
+
         if load_optimizer and self.optimizer and checkpoint.get('optimizer_state_dict'):
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         

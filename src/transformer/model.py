@@ -200,8 +200,8 @@ class Transformer(nn.Module):
         self.output_linear = nn.Linear(d_model, vocab_size, bias=False)
         self.output_linear.weight = self.embedding.weight
         
-        # 位置编码缓存（默认开启）
-        self.register_buffer('pos_encoding_cache', None)
+        # 位置编码缓存（默认开启；不持久化，避免写入state_dict）
+        self.register_buffer('pos_encoding_cache', None, persistent=False)
         self.cached_seq_len = 0
 
         # embedding dropout
@@ -249,7 +249,8 @@ class Transformer(nn.Module):
         if self.use_pos_encoding_cache:
             if seq_len > self.cached_seq_len:
                 pos_encoding = self._pos_encoding_no_cache(seq_len, device)
-                self.register_buffer('pos_encoding_cache', pos_encoding)
+                # 已注册为buffer，直接赋值更新其内容，保持非持久化属性
+                self.pos_encoding_cache = pos_encoding
                 self.cached_seq_len = seq_len
             return self.pos_encoding_cache[:seq_len]
         else:
