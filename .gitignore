@@ -10,7 +10,8 @@ wheels/
 .venv
 docs_private/
 runs/
-data/
+# 只 ignore 顶层的 data 目录
+/data/
 note*.md
 *.pth
 .DS_Store
