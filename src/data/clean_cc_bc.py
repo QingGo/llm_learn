@@ -3,7 +3,7 @@ import os
 from typing import List, Dict, Any, Optional, Iterator, Union, Tuple
 
 import torch
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, Dataset
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
@@ -435,6 +435,125 @@ class TextProcessingDataset(IterableDataset):
                 elif not self.skip_invalid:
                     raise ValueError(f"数据一致性检查失败: {consistency}")
                 # 否则跳过无效数据
+
+    def __len__(self) -> int:
+        # to-do: 不准确
+        return len(self.dataset)
+
+
+class TextProcessingMapDataset(Dataset):
+    """
+    离线处理后的块级数据集包装，提供随机索引访问
+
+    该类用于消费已通过离线流程生成的HF Dataset（每行即一个训练块），
+    并以PyTorch Dataset形式暴露给DataLoader使用。
+    """
+    def __init__(self, processed_dataset):
+        self.dataset = processed_dataset.with_format("torch")
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        row = self.dataset[idx]
+        return {"input_ids": row["input_ids"], "attention_mask": row["attention_mask"]}
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+
+def _to_blocks_batch(
+    batch: Dict[str, List[str]],
+    tokenizer: Tokenizer,
+    text_column: str,
+    max_seq_length: Optional[int],
+    min_seq_length: int,
+    book_threshold: int,
+    pad_token_id: int,
+) -> Dict[str, List[List[int]]]:
+    """将一个批次的原始文本展开为块级样本（input_ids/attention_mask 列）"""
+    out_input_ids: List[List[int]] = []
+    out_attention_mask: List[List[int]] = []
+    texts = batch[text_column]
+    for text in texts:
+        cleaned_text = clean_text(text)
+        if len(cleaned_text) > book_threshold:
+            text_blocks = split_long_text(cleaned_text, max_length=2000)
+        else:
+            text_blocks = [cleaned_text]
+        for tb in text_blocks:
+            tokenized = tokenize_text(tokenizer, tb)
+            tensors = convert_to_tensors(
+                tokenized,
+                max_length=max_seq_length,
+                padding=True,
+                pad_token_id=pad_token_id,
+            )
+            cons = check_data_consistency(
+                tensors,
+                max_seq_length=max_seq_length,
+                min_seq_length=min_seq_length,
+            )
+            if cons["is_consistent"]:
+                out_input_ids.append(tensors["input_ids"].tolist())
+                out_attention_mask.append(tensors["attention_mask"].tolist())
+    return {"input_ids": out_input_ids, "attention_mask": out_attention_mask}
+
+
+def build_block_dataset(
+    raw_dataset,
+    tokenizer: Tokenizer,
+    text_column: str = "text",
+    max_seq_length: Optional[int] = 1024,
+    min_seq_length: int = 5,
+    book_threshold: int = 2000,
+    pad_token_id: int = 50256,
+    num_proc: int = 8,
+):
+    """将原始HF Dataset离线展开为块级数据集，仅保留张量列"""
+    processed = raw_dataset.map(
+        lambda batch: _to_blocks_batch(
+            batch,
+            tokenizer,
+            text_column,
+            max_seq_length,
+            min_seq_length,
+            book_threshold,
+            pad_token_id,
+        ),
+        batched=True,
+        remove_columns=raw_dataset.column_names,
+        num_proc=num_proc,
+    )
+    return processed
+
+
+def preprocess_and_save(
+    output_path: str,
+    max_seq_length: Optional[int] = 1024,
+    min_seq_length: int = 5,
+    book_threshold: int = 2000,
+    pad_token_id: int = 50256,
+    tokenizer_path: str = "./data/tokenizer.json",
+    vocab_size: int = 30000,
+    num_proc: int = 8,
+):
+    """
+    执行离线预处理：加载原始数据→训练或加载分词器→展开为块级→保存到磁盘
+    """
+    common_crawl_ds, book_corpus_ds = load_hf_datasets()
+    merged_dataset = create_merged_dataset(common_crawl_ds, book_corpus_ds)
+    tokenizer = train_or_load_tokenizer(common_crawl_ds, book_corpus_ds, tokenizer_path=tokenizer_path, vocab_size=vocab_size)
+    processed = build_block_dataset(
+        merged_dataset,
+        tokenizer,
+        text_column="text",
+        max_seq_length=max_seq_length,
+        min_seq_length=min_seq_length,
+        book_threshold=book_threshold,
+        pad_token_id=pad_token_id,
+        num_proc=num_proc,
+    )
+    print(f'共生成 {len(processed)} 个数据')
+    processed.save_to_disk(output_path)
+    return output_path
 
 
 def load_hf_datasets() -> Tuple[Any, Any]:

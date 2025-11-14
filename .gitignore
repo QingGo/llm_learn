@@ -24,3 +24,4 @@ graph/
 tensorboard_diagnosis_report.txt
 download/
 my_bert_model/
+.trae/documents/
