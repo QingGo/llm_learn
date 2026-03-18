@@ -663,6 +663,7 @@ source = { editable = "." }
 dependencies = [
     { name = "datasets" },
     { name = "matplotlib" },
+    { name = "modelscope" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pytest" },
@@ -685,6 +686,7 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=4.3.0" },
     { name = "matplotlib", specifier = ">=3.10.7" },
+    { name = "modelscope", specifier = ">=1.35.0" },
     { name = "numpy", specifier = ">=2.3.4" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pytest", specifier = ">=8.4.2" },
@@ -828,6 +830,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "modelscope"
+version = "1.35.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "filelock" },
+    { name = "requests" },
+    { name = "setuptools" },
+    { name = "tqdm" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/58/c8bf255dbf84d3cfcf7044a181ef6af82a1817c5ed9238da6159dad6ad31/modelscope-1.35.0.tar.gz", hash = "sha256:e2a8368e73d32ff2792873580a4993e6f8108cd11c5c2e2a3b3f072cdae18fa2", size = 4562044, upload-time = "2026-03-14T03:22:51.089Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/82/cfdc5d8a8b16900d5475d7c463f219392a826fe236da678ca1b2d3a768f3/modelscope-1.35.0-py3-none-any.whl", hash = "sha256:0c9e8e9d65df444aa6fdbfc32fb8759d3c46b9a54ab26062b77e96979e5a61e1", size = 6053785, upload-time = "2026-03-14T03:22:47.829Z" },
 ]
 
 [[package]]
