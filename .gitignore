@@ -26,3 +26,4 @@ download/
 my_bert_model/
 .trae/documents/
 local_datasets/
+temp/
