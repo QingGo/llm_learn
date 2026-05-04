@@ -27,3 +27,8 @@ my_bert_model/
 .trae/documents/
 local_datasets/
 temp*/
+Megatron-LM/
+*.o
+*.ncu-rep
+*.qdstrm
+*.qdrep

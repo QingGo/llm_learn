@@ -1,0 +1,10 @@
+[project]
+name = "learning-framework"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx[socks]>=0.28.1",
+    "vllm>=0.20.0",
+]
