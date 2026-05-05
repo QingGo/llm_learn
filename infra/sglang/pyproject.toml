@@ -1,5 +1,5 @@
 [project]
-name = "infra"
+name = "infra-sglang"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -11,8 +11,3 @@ dependencies = [
 
 [tool.uv.sources]
 sglang = { url = "https://github.com/QingGo/sglang/releases/download/v0.5.10-sm75-only/sglang-0.5.10+sm75-py3-none-any.whl" }
-
-[tool.uv.workspace]
-members = [
-    "bench",
-]
